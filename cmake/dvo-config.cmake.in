@@ -1,0 +1,4 @@
+include(CMakeFindDependencyMacro)
+find_dependency(napalm)
+find_dependency(napalm_cv)
+include(${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@-targets.cmake)
