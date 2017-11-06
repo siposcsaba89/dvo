@@ -5,6 +5,8 @@ project(napalm_cv)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
+option(BUILD_EXAMPLES "Build cv examples" ON)
+
 find_package(napalm REQUIRED)
 
 set(PUBLIC_HDRS
@@ -16,6 +18,18 @@ set(SRCS
 )
 
 add_library(${PROJECT_NAME} ${PUBLIC_HDRS} ${SRCS})
+set (PROGRAMS src/convolv.cl)
+set(EMBED_PROGRAM_FILES FALSE)
+set(COMPILE_IN_BUILD_TYPE_IF_POSSIBLE FALSE)
+set(PROGRAM_RUNTIME_SOURCE_DIR "./kernels/")
+create_programs("${PROGRAMS}"
+    output ${PROJECT_NAME}
+    COMPILE_IN_BUILD_TYPE_IF_POSSIBLE 
+    ${EMBED_PROGRAM_FILES}
+    ${PROGRAM_RUNTIME_SOURCE_DIR}
+)
+
+
 add_library(::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 if (BUILD_SHARED_LIBS)
     set_target_properties(${PROJECT_NAME} PROPERTIES CXX_VISIBILITY_PRESET hidden)
@@ -66,6 +80,10 @@ install(FILES
 	${PUBLIC_HDRS}
     DESTINATION include/${PROJECT_NAME}/napalm/cv)
 
+if (BUILD_EXAMPLES)
+    add_subdirectory(samples/tests)
+endif()
+    
 # uninstall target
 if(NOT TARGET uninstall)
     configure_file(
