@@ -9,7 +9,9 @@ option(BUILD_EXAMPLES "Build dvo examples" ON)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
-find_package(napalm REQUIRED)
+if (NOT TARGET ::napalm)
+    find_package(napalm REQUIRED)
+endif()
 
 add_subdirectory(napalm_cv)
 

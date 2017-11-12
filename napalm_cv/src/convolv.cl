@@ -57,16 +57,19 @@ kernel void convolv_buff_nxn(global const unsigned char* input, global unsigned 
     convolv_buff(input, output, width, height, chc, kernel_data, k_width, k_height);
 }
 
-kernel void convolv_img(read_only image2d_t input, write_only image2d_t output, 
+
+
+inline void convolv_img(read_only image2d_t input, write_only image2d_t output,
+    const int img_w, const int img_h, 
     global const float * kernel_data, const int k_width, const int k_height)
 {
-
     const sampler_t img_sampler = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_LINEAR;
 
     float i = get_global_id(0);
     float j = get_global_id(1);
 
-    
+    if (i >= img_w || j >= img_h)
+        return;
 
     float4 res = 0.0f;
 #pragma unroll
@@ -80,5 +83,26 @@ kernel void convolv_img(read_only image2d_t input, write_only image2d_t output,
 
     }
     write_imagef(output, (int2)(i, j), res);
+}
+
+kernel void convolv_img_3x3(read_only image2d_t input, write_only image2d_t output,
+    const int img_w, const int img_h,
+    global const float * kernel_data)
+{
+    convolv_img(input, output, img_w, img_h, kernel_data, 3, 3);
+}
+
+kernel void convolv_img_5x5(read_only image2d_t input, write_only image2d_t output,
+    const int img_w, const int img_h,
+    global const float * kernel_data)
+{
+    convolv_img(input, output, img_w, img_h, kernel_data, 5, 5);
+}
+
+kernel void convolv_img_nxn(read_only image2d_t input, write_only image2d_t output,
+    const int img_w, const int img_h,
+    global const float * kernel_data, const int k_width, const int k_height)
+{
+    convolv_img(input, output, img_w, img_h, kernel_data, k_width, k_height);
 }
 

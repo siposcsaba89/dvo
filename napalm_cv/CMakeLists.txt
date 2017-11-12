@@ -6,8 +6,9 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 option(BUILD_EXAMPLES "Build cv examples" ON)
-
-find_package(napalm REQUIRED)
+if (NOT TARGET ::napalm)
+    find_package(napalm REQUIRED)
+endif()
 
 set(PUBLIC_HDRS
     include/napalm/cv/cv.h
