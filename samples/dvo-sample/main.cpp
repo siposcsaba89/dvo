@@ -1,7 +1,7 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include <napalm/napalm.h>
-
+#include <dvo/dvo.h>
 
 napalm::Context * createContext(const std::string & backend, int platform_idx, int device_idx);
 

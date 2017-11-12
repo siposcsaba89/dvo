@@ -13,6 +13,8 @@ if (NOT TARGET ::napalm)
     find_package(napalm REQUIRED)
 endif()
 
+find_package(Eigen3 REQUIRED CONFIG)
+
 add_subdirectory(napalm_cv)
 
 set(PUBLIC_HDRS
@@ -38,7 +40,7 @@ endif()
 source_group(${PROJECT_NAME} FILES ${PUBLIC_HDRS})
 source_group("src" FILES ${SRCS})
 
-target_link_libraries(${PROJECT_NAME} PUBLIC ::napalm ::napalm_cv)
+target_link_libraries(${PROJECT_NAME} PUBLIC ::napalm ::napalm_cv Eigen3::Eigen)
 
 include(GenerateExportHeader)
 generate_export_header(${PROJECT_NAME} EXPORT_FILE_NAME ${CMAKE_BINARY_DIR}/gen/dvo/${PROJECT_NAME}_export.h)
