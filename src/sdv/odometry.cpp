@@ -5,6 +5,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include <spdlog/spdlog.h>
+
 namespace sdv {
 
 namespace {
@@ -123,11 +125,16 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
     traceStereo(id, std::make_shared<const ImagePyramid>(toFloatGray(m_currentRight), 1));
   }
 
+  const size_t before = m_window.points().size();
   activateCandidates(id);
+  const size_t activated = m_window.points().size();
   m_window.optimize(m_settings.windowIterations);
   removeOutlierPoints();
+  const size_t kept = m_window.points().size();
   storeKeyframePoses();
   marginalizeKeyframes();
+  spdlog::debug("keyframe {}: points {} +{} activated -{} outliers -{} marginalised, activation cell {:.1f}", index,
+                before, activated - before, activated - kept, kept - m_window.points().size(), m_activationCell);
   if (!m_rightCam) selectCandidates(id);
 
   m_referenceId = id;
@@ -242,13 +249,12 @@ void Odometry::activateCandidates(int newKeyframeId) {
 }
 
 void Odometry::removeOutlierPoints() {
+  // Outlier residuals are already excluded from the optimisation. A point is only dropped when no residual
+  // supports it: new points are often occluded or strongly warped in keyframes older than their host, which
+  // tracing never checked, and dropping them for that starves monocular scale (KITTI 00, frames 4000-4500).
   std::vector<int> remove;
-  for (const auto& p : m_window.points()) {
-    const int good = p.numGood();
-    const auto outliers = std::count_if(p.residuals.begin(), p.residuals.end(),
-                                        [](const WindowResidual& r) { return r.state == ResidualState::Outlier; });
-    if ((good == 0 && !p.residuals.empty()) || outliers > good) remove.push_back(p.id);
-  }
+  for (const auto& p : m_window.points())
+    if (p.numGood() == 0 && !p.residuals.empty()) remove.push_back(p.id);
   for (int id : remove) m_window.removePoint(id);
 }
 

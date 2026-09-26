@@ -28,7 +28,7 @@ namespace po = boost::program_options;
 int main(int argc, char** argv) {
   std::string sequenceDir, gtFile, outFile, plyFile, jsonFile, pngFile, colmapDir;
   bool colmapKeyframesOnly = false, colmapAlign = false;
-  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0;
+  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, traceOutlier = 12.0;
   size_t start = 0, maxFrames = 100;
   bool verbose = false, stereo = false;
   sdv::OdometrySettings settings;
@@ -59,6 +59,13 @@ int main(int argc, char** argv) {
       ("kf-flow", po::value(&settings.kfFlow)->default_value(settings.kfFlow), "keyframe flow scale (px)")
       ("kf-tflow", po::value(&settings.kfTranslationFlow)->default_value(settings.kfTranslationFlow),
        "keyframe translation flow scale (px)")
+      ("trace-samples", po::value(&settings.trace.maxSamples)->default_value(settings.trace.maxSamples),
+       "max samples per epipolar search")
+      ("ba-outlier", po::value(&settings.window.outlierThreshold)->default_value(settings.window.outlierThreshold),
+       "window BA residual outlier threshold (intensity)")
+      ("trace-outlier", po::value(&traceOutlier)->default_value(12.0), "candidate tracing outlier threshold (intensity)")
+      ("act-error", po::value(&settings.activationMaxErrorPixels)->default_value(settings.activationMaxErrorPixels),
+       "max candidate depth error (px) for activation")
       ("verbose,v", po::bool_switch(&verbose), "debug logging");
   try {
     po::variables_map vm;
@@ -74,6 +81,7 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
   if (verbose) spdlog::set_level(spdlog::level::debug);
+  settings.trace.outlierEnergyPerPixel = traceOutlier * traceOutlier;
 
   try {
     const sdv::KittiSequence seq(sequenceDir, 1 << (settings.levels - 1));

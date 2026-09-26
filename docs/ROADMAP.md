@@ -30,3 +30,14 @@ Deferred to step 11:
   activation thresholds, candidate tracing quality.
 - Stereo (step 9), 300 frames of KITTI 00: ATE 0.24 m SE3, 1.37 % translation drift, scale 1.00; rotation drift
   still ~1.1 deg/100m (same as mono) and ~160 ms/frame.
+
+## Step 11 log
+
+Benchmark: `tools/bench.sh <tag> stereo|mono 500` runs all nine 500-frame segments of KITTI 00 in parallel and
+reports the mean ATE (Sim3, and SE3 for stereo) and the KITTI segment drift (100-800 m). The 300-frame numbers
+above are dominated by 100 m segments and overstate rotation drift.
+
+| Change | Stereo ATE SE3 / t % / r deg/100m | Mono ATE Sim3 / t % / r deg/100m |
+|--------|-----------------------------------|----------------------------------|
+| baseline | 0.474 / 0.85 / 0.435 | 17.9 / 15.7 / 4.16 (segment 4000 diverges) |
+| drop points only without any good residual | 0.494 / 0.85 / 0.465 | 4.08 / 4.52 / 0.466 |
