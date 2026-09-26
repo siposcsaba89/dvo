@@ -24,8 +24,12 @@ add_library(sdv STATIC
   src/sdv/camera.h
   src/sdv/image_pyramid.h
   src/sdv/image_pyramid.cpp
+  src/sdv/immature_point.h
+  src/sdv/immature_point.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
+  src/sdv/point_selector.h
+  src/sdv/point_selector.cpp
   src/sdv/stereo_depth.h
   src/sdv/stereo_depth.cpp
   src/sdv/tracker.h
@@ -47,18 +51,25 @@ target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
 add_executable(track_stereo apps/track_stereo.cpp)
 target_link_libraries(track_stereo PRIVATE sdv Boost::program_options)
 
+add_executable(depth_test apps/depth_test.cpp)
+target_link_libraries(depth_test PRIVATE sdv Boost::program_options)
+
 add_executable(eval_traj apps/eval_traj.cpp)
 target_link_libraries(eval_traj PRIVATE sdv Boost::program_options)
 
 enable_testing()
 add_executable(sdv_tests
+  tests/synthetic_scene.h
   tests/test_camera.cpp
+  tests/test_immature_point.cpp
   tests/test_photometric.cpp
   tests/test_ply.cpp
+  tests/test_point_selector.cpp
   tests/test_pyramid.cpp
   tests/test_tracker.cpp
   tests/test_trajectory.cpp
 )
+target_include_directories(sdv_tests PRIVATE tests)
 target_link_libraries(sdv_tests PRIVATE sdv GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(sdv_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 60)
