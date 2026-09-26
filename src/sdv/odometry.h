@@ -38,6 +38,8 @@ struct OdometrySettings {
   double kfBrightness = 0.7;
   double kfRmseFactor = 2.0;
   double marginalizeVisibleFraction = 0.05;  // DSO §3.1
+  double stereoMinDepth = 1.5;  // bounds the initial stereo search range
+  int stereoMaxSamples = 400;
 };
 
 struct MapPoint {
@@ -57,13 +59,17 @@ struct OdometryFrameInfo {
   int immaturePoints = 0;
 };
 
-// Monocular direct sparse odometry: initialisation, frame tracking, candidate tracing, keyframe window
-// optimisation and marginalisation.
-class MonoOdometry {
+// Direct sparse odometry: initialisation, frame tracking, candidate tracing, keyframe window optimisation and
+// marginalisation. Monocular by default; with a stereo rig, keyframes add static stereo constraints (metric
+// scale) and initialisation uses stereo depth.
+class Odometry {
  public:
-  MonoOdometry(const Camera& cam, OdometrySettings settings = {});
+  Odometry(const Camera& cam, OdometrySettings settings = {});
 
-  OdometryFrameInfo addFrame(const cv::Mat& image);
+  // T_r_l maps left-camera to right-camera coordinates. Must be called before the first frame.
+  void enableStereo(const Camera& rightCam, const Sophus::SE3d& T_r_l);
+  // `right` is required in stereo mode.
+  OdometryFrameInfo addFrame(const cv::Mat& image, const cv::Mat& right = {});
 
   bool initialized() const { return m_initialized; }
   // T_w_c per input frame, final estimates; empty for frames before initialisation.
@@ -87,6 +93,8 @@ class MonoOdometry {
   int createKeyframe(std::shared_ptr<const ImagePyramid> image, const Sophus::SE3d& T_c_w,
                      const AffineBrightness& affine);
   void selectCandidates(int keyframeId);
+  void traceStereo(int keyframeId, std::shared_ptr<const ImagePyramid> right);
+  TraceSettings candidateSettings() const;
   void traceCandidates(const ImagePyramid& image, const Sophus::SE3d& T_c_w, const AffineBrightness& affine);
   void activateCandidates(int newKeyframeId);
   void removeOutlierPoints();
@@ -103,6 +111,10 @@ class MonoOdometry {
   FrameTracker m_tracker;
   WindowOptimizer m_window;
   PointSelector m_selector;
+
+  std::optional<Camera> m_rightCam;
+  Sophus::SE3d m_T_r_l;
+  cv::Mat m_currentRight;
 
   bool m_initialized = false;
   int m_frameCount = 0;

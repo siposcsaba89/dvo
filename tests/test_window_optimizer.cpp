@@ -258,6 +258,39 @@ TEST_P(WindowOptimizerTest, SlidingWindowStaysAtTruthInTurn) {
   }
 }
 
+TEST_P(WindowOptimizerTest, StereoResidualsRecoverMetricScale) {
+  const sdv::Camera& cam = GetParam();
+  const Scene scene = makeScene(cam, 4);
+  const Sophus::SE3d T_r_l(Sophus::SO3d(), Eigen::Vector3d(-0.3, 0, 0));
+  sdv::WindowOptimizer opt(cam);
+  opt.setStereo(cam, T_r_l);
+  constexpr double wrongScale = 1.2;
+  std::map<int, double> truth;
+  for (size_t k = 0; k < scene.poses.size(); ++k) {
+    Sophus::SE3d T = scene.poses[k];
+    T.translation() *= wrongScale;
+    const int id = opt.addFrame(scene.images[k], T, scene.affine[k]);
+    const auto right = std::make_shared<sdv::ImagePyramid>(
+        renderSmooth(cam, T_r_l * scene.poses[k], std::exp(scene.affine[k].a), scene.affine[k].b), 1);
+    opt.setFrameStereo(id, right, {});
+    for (int v = 16; v < kH - 16; v += 16)
+      for (int u = 16; u < kW - 16; u += 16) {
+        Eigen::Vector3d b;
+        if (!cam.unproject(Eigen::Vector2d(u, v), b)) continue;
+        const double rho = synthetic::trueRho(scene.poses[k], b);
+        if (rho <= 0) continue;
+        if (const int pid = opt.addPoint(id, Eigen::Vector2d(u, v), rho / wrongScale); pid >= 0) truth[pid] = rho;
+      }
+  }
+  opt.optimize(30);
+  std::vector<double> ratios;
+  for (const auto& p : opt.points()) ratios.push_back(p.rho / truth.at(p.id));
+  std::nth_element(ratios.begin(), ratios.begin() + ratios.size() / 2, ratios.end());
+  EXPECT_NEAR(ratios[ratios.size() / 2], 1.0, 0.01);
+  for (size_t k = 1; k < scene.poses.size(); ++k)
+    EXPECT_LT((opt.frames()[k].params.T_c_w.translation() - scene.poses[k].translation()).norm(), 5e-3) << k;
+}
+
 INSTANTIATE_TEST_SUITE_P(Cameras, WindowOptimizerTest,
                          ::testing::Values(sdv::Camera::pinhole(250, 250, 159.5, 119.5, kW, kH),
                                            sdv::Camera::eucm(140, 140, 160.2, 119.7, 0.6, 1.1, kW, kH)),

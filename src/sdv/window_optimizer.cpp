@@ -73,7 +73,8 @@ bool evaluateWindowResidual(const PatternPoint& point, double rho, const FramePa
 
 int WindowPoint::numGood() const {
   return static_cast<int>(std::count_if(residuals.begin(), residuals.end(),
-                                        [](const WindowResidual& r) { return r.state == ResidualState::Good; }));
+                                        [](const WindowResidual& r) { return r.state == ResidualState::Good; })) +
+         (stereoState == ResidualState::Good ? 1 : 0);
 }
 
 Eigen::Matrix<double, 8, 1> WindowFrame::delta() const {
@@ -131,6 +132,33 @@ int WindowOptimizer::addPoint(int hostId, const Eigen::Vector2d& uv, double rho)
   return m_points.back().id;
 }
 
+void WindowOptimizer::setStereo(const Camera& rightCam, const Sophus::SE3d& T_r_l) {
+  m_rightCam = rightCam;
+  m_T_r_l = T_r_l;
+}
+
+void WindowOptimizer::setFrameStereo(int frameId, std::shared_ptr<const ImagePyramid> right,
+                                     const AffineBrightness& stereoAffine) {
+  WindowFrame& f = m_frames[frameIndex(frameId)];
+  f.right = std::move(right);
+  f.stereoAffine = stereoAffine;
+}
+
+bool WindowOptimizer::evaluateStereo(const WindowPoint& p, WindowPatternResidual& out) const {
+  if (!m_rightCam) return false;
+  const WindowFrame& host = m_frames[frameIndex(p.host)];
+  if (!host.right) return false;
+  // Host at the origin with neutral brightness, so the pattern's raw intensities map through the stereo affine.
+  const FrameParams left{Sophus::SE3d(), {}, 1.0};
+  const FrameParams right{m_T_r_l, host.stereoAffine, 1.0};
+  if (!evaluateWindowResidual(p.pattern, p.rho, left, right, left, right, *m_rightCam, host.right->level(0),
+                              m_settings.photometric, out))
+    return false;
+  for (auto& px : out.pixels) px.weight *= m_settings.stereoWeight;
+  out.energy *= m_settings.stereoWeight;
+  return true;
+}
+
 void WindowOptimizer::removePoint(int pointId) {
   std::erase_if(m_points, [&](const WindowPoint& p) { return p.id == pointId; });
 }
@@ -183,6 +211,11 @@ WindowOptimizer::System WindowOptimizer::linearize(const std::vector<size_t>& po
       pb.Hfr[h] += hrh;
       pb.Hfr[t] += hrt;
     }
+    if (p.stereoState == ResidualState::Good && evaluateStereo(p, res))
+      for (const auto& px : res.pixels) {
+        pb.Hrr += px.weight * px.dRho * px.dRho;
+        pb.gr += px.weight * px.r * px.dRho;
+      }
   }
   return sys;
 }
@@ -205,6 +238,12 @@ void WindowOptimizer::classifyResiduals() {
       r.energy = res.energy;
       r.state = res.energy > maxEnergy ? ResidualState::Outlier : ResidualState::Good;
     }
+    if (!evaluateStereo(p, res)) {
+      p.stereoState = ResidualState::OutOfBounds;
+      continue;
+    }
+    p.stereoEnergy = res.energy;
+    p.stereoState = res.energy > maxEnergy * m_settings.stereoWeight ? ResidualState::Outlier : ResidualState::Good;
   }
 }
 
@@ -247,6 +286,7 @@ double WindowOptimizer::energy() const {
                ? res.energy
                : r.energy;
     }
+    if (p.stereoState == ResidualState::Good) e += evaluateStereo(p, res) ? res.energy : p.stereoEnergy;
   }
   return e + priorEnergy();
 }

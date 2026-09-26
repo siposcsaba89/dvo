@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <Eigen/Core>
@@ -46,6 +47,7 @@ struct WindowSettings {
   double firstFramePrior = 1e10;
   int maxIterations = 6;
   double minRhoHessian = 1e-3;  // points with less depth information are dropped instead of marginalised
+  double stereoWeight = 1.0;  // relative weight of static stereo residuals
 };
 
 enum class ResidualState { Good, OutOfBounds, Outlier };
@@ -64,8 +66,11 @@ struct WindowPoint {
   double rho;
   double hRho = 0;  // photometric depth information from the last optimisation
   std::vector<WindowResidual> residuals;
+  // Static stereo residual into the host keyframe's right image (only depends on rho).
+  ResidualState stereoState = ResidualState::OutOfBounds;
+  double stereoEnergy = 0;
 
-  int numGood() const;
+  int numGood() const;  // temporal residuals plus the stereo residual
 };
 
 struct WindowFrame {
@@ -74,6 +79,8 @@ struct WindowFrame {
   FrameParams params;
   FrameParams linearization;  // fixed once the frame is part of the marginalisation prior
   bool inPrior = false;
+  std::shared_ptr<const ImagePyramid> right;
+  AffineBrightness stereoAffine;  // I_right = exp(a) * I_left + b, fixed
 
   Eigen::Matrix<double, 8, 1> delta() const;
 };
@@ -96,6 +103,11 @@ class WindowOptimizer {
   int addPoint(int hostId, const Eigen::Vector2d& uv, double rho);
   void removePoint(int pointId);
   void setFrameParams(int frameId, const FrameParams& params) { m_frames[frameIndex(frameId)].params = params; }
+
+  // Rigid stereo rig: T_r_l maps left-camera to right-camera coordinates.
+  void setStereo(const Camera& rightCam, const Sophus::SE3d& T_r_l);
+  void setFrameStereo(int frameId, std::shared_ptr<const ImagePyramid> right, const AffineBrightness& stereoAffine);
+  bool stereo() const { return m_rightCam.has_value(); }
 
   WindowOptimizationResult optimize(int maxIterations = -1);
   void marginalizeFrame(int frameId);
@@ -123,8 +135,11 @@ class WindowOptimizer {
   double energy() const;
   double priorEnergy() const;
   void addPriors(System& sys) const;
+  bool evaluateStereo(const WindowPoint& p, WindowPatternResidual& out) const;
 
   Camera m_camera;
+  std::optional<Camera> m_rightCam;
+  Sophus::SE3d m_T_r_l;
   WindowSettings m_settings;
   std::vector<WindowFrame> m_frames;
   std::vector<WindowPoint> m_points;

@@ -28,3 +28,5 @@ Deferred to step 11:
 - Full mono pipeline (step 7): ~110 ms/frame; scale drifts ~20 % over 250 frames of KITTI 00 (local scale
   1.13 -> 0.91), 4.8 % / 1.06 deg per 100 m. Candidates: photometric calibration (vignetting), keyframe and
   activation thresholds, candidate tracing quality.
+- Stereo (step 9), 300 frames of KITTI 00: ATE 0.24 m SE3, 1.37 % translation drift, scale 1.00; rotation drift
+  still ~1.1 deg/100m (same as mono) and ~160 ms/frame.

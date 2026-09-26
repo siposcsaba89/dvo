@@ -73,8 +73,8 @@ target_link_libraries(mono_init PRIVATE sdv Boost::program_options)
 add_executable(window_stereo apps/window_stereo.cpp)
 target_link_libraries(window_stereo PRIVATE sdv Boost::program_options)
 
-add_executable(run_mono apps/run_mono.cpp)
-target_link_libraries(run_mono PRIVATE sdv Boost::program_options)
+add_executable(run_vo apps/run_vo.cpp)
+target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
 
 enable_testing()
 add_executable(sdv_tests

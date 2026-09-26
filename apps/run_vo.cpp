@@ -1,4 +1,4 @@
-// Full monocular pipeline on a KITTI sequence; evaluation after Sim3 alignment (scale is unobservable).
+// Direct sparse odometry on a KITTI sequence, monocular (Sim3 evaluation) or stereo (also metric SE3).
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -30,13 +30,14 @@ int main(int argc, char** argv) {
   bool colmapKeyframesOnly = false, colmapAlign = false;
   double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0;
   size_t start = 0, maxFrames = 100;
-  bool verbose = false;
+  bool verbose = false, stereo = false;
   sdv::OdometrySettings settings;
 
-  po::options_description desc("run_mono options");
+  po::options_description desc("run_vo options");
   desc.add_options()
       ("help,h", "show help")
       ("sequence,s", po::value(&sequenceDir)->required(), "KITTI sequence directory")
+      ("stereo", po::bool_switch(&stereo), "use the right camera (image_1): metric scale")
       ("gt", po::value(&gtFile), "ground-truth poses for evaluation")
       ("out,o", po::value(&outFile), "write estimated poses (KITTI format, frames with a pose)")
       ("ply", po::value(&plyFile), "write trajectory, GT and map points (Sim3-aligned to GT if given)")
@@ -77,15 +78,17 @@ int main(int argc, char** argv) {
   try {
     const sdv::KittiSequence seq(sequenceDir, 1 << (settings.levels - 1));
     const size_t n = std::min(maxFrames, seq.size() - start);
-    sdv::MonoOdometry vo(seq.camera(), settings);
+    sdv::Odometry vo(seq.camera(), settings);
+    if (stereo) vo.enableStereo(seq.camera(), Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-seq.baseline(), 0, 0)));
 
     using Clock = std::chrono::steady_clock;
     double totalMs = 0, maxMs = 0;
     int keyframes = 0, weak = 0;
     for (size_t i = 0; i < n; ++i) {
       const cv::Mat image = seq.loadImage(start + i, 0);
+      const cv::Mat right = stereo ? seq.loadImage(start + i, 1) : cv::Mat();
       const auto t0 = Clock::now();
-      const sdv::OdometryFrameInfo info = vo.addFrame(image);
+      const sdv::OdometryFrameInfo info = vo.addFrame(image, right);
       const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
       totalMs += ms;
       maxMs = std::max(maxMs, ms);
@@ -110,8 +113,8 @@ int main(int argc, char** argv) {
     if (!outFile.empty()) sdv::saveKittiPoses(outFile, est);
 
     sdv::SimilarityTransform alignment;
-    std::string metrics = fmt::format(R"("frames":{},"start":{},"keyframes":{},"msPerFrame":{:.1f})", n, start,
-                                      keyframes, totalMs / n);
+    std::string metrics = fmt::format(R"("stereo":{},"frames":{},"start":{},"keyframes":{},"msPerFrame":{:.1f})",
+                                      stereo, n, start, keyframes, totalMs / n);
     if (!gt.empty() && est.size() > 2) {
       const auto ate = sdv::absoluteTrajectoryError(gt, est, true);
       alignment = ate.alignment;
@@ -128,9 +131,19 @@ int main(int argc, char** argv) {
         localScale += fmt::format(" {:.2f}", g / e / alignment.scale);
         localScaleJson += fmt::format("{}{:.3f}", localScaleJson.empty() ? "" : ",", g / e / alignment.scale);
       }
-      metrics += fmt::format(R"(,"ateRmse":{:.3f},"ateMax":{:.3f},"length":{:.1f},"driftT":{:.2f},"driftR":{:.3f},)"
+      if (stereo) {
+        const auto metric = sdv::absoluteTrajectoryError(gt, est, false);
+        std::vector<Sophus::SE3d> metricAligned = est;
+        for (auto& p : metricAligned) p = metric.alignment.applyToPose(p);
+        const auto metricSeg = sdv::segmentDriftError(gt, metricAligned);
+        spdlog::info("stereo, metric: ATE SE3 rmse {:.3f} m, max {:.3f} m | drift t {:.2f} % r {:.3f} deg/100m",
+                     metric.rmse, metric.max, metricSeg.translationPercent, metricSeg.rotationDegPer100m);
+      }
+      metrics += fmt::format(R"(,"scale":{:.4f},"ateRmse":{:.3f},"ateMax":{:.3f},"length":{:.1f},"driftT":{:.2f},)"
+                             R"("driftR":{:.3f},)"
                              R"("localScale":[{}])",
-                             ate.rmse, ate.max, length, seg.translationPercent, seg.rotationDegPer100m,
+                             alignment.scale, ate.rmse, ate.max, length, seg.translationPercent,
+                             seg.rotationDegPer100m,
                              localScaleJson);
       spdlog::info("local scale per 50 frames relative to global:{}", localScale);
       spdlog::info("ATE Sim3 rmse {:.3f} m, max {:.3f} m, scale {:.3f} over {:.0f} m | drift t {:.2f} % "
