@@ -25,3 +25,6 @@ Deferred to step 11:
   (Sim3 scale 0.93 over 100 frames); not reproduced synthetically, not caused by marginalisation, FEJ, window
   size, point count or image periphery. Revisit after point management (step 7) and stereo residuals (step 9).
 - Window BA speed (~300 ms per keyframe with ~5000 points).
+- Full mono pipeline (step 7): ~110 ms/frame; scale drifts ~20 % over 250 frames of KITTI 00 (local scale
+  1.13 -> 0.91), 4.8 % / 1.06 deg per 100 m. Candidates: photometric calibration (vignetting), keyframe and
+  activation thresholds, candidate tracing quality.

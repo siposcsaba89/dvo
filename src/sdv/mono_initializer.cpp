@@ -1,4 +1,4 @@
-﻿#include <sdv/mono_initializer.h>
+#include <sdv/mono_initializer.h>
 
 #include <algorithm>
 #include <cmath>

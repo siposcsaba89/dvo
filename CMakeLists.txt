@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.25)
 project(sparse_direct_vo LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -28,6 +28,8 @@ add_library(sdv STATIC
   src/sdv/immature_point.cpp
   src/sdv/mono_initializer.h
   src/sdv/mono_initializer.cpp
+  src/sdv/odometry.h
+  src/sdv/odometry.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_selector.h
@@ -67,12 +69,16 @@ target_link_libraries(mono_init PRIVATE sdv Boost::program_options)
 add_executable(window_stereo apps/window_stereo.cpp)
 target_link_libraries(window_stereo PRIVATE sdv Boost::program_options)
 
+add_executable(run_mono apps/run_mono.cpp)
+target_link_libraries(run_mono PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
   tests/test_camera.cpp
   tests/test_immature_point.cpp
   tests/test_mono_initializer.cpp
+  tests/test_odometry.cpp
   tests/test_photometric.cpp
   tests/test_ply.cpp
   tests/test_point_selector.cpp

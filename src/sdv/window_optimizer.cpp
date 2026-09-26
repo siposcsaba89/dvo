@@ -1,4 +1,4 @@
-﻿#include <sdv/window_optimizer.h>
+#include <sdv/window_optimizer.h>
 
 #include <algorithm>
 #include <cmath>

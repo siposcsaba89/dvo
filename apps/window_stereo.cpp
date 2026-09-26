@@ -1,4 +1,4 @@
-﻿// Validates the sliding-window BA: keyframe points start from stereo depth, then only photometric BA
+// Validates the sliding-window BA: keyframe points start from stereo depth, then only photometric BA
 // (monocular residuals) refines poses and depths. Frames are tracked against the projected window points.
 #include <chrono>
 #include <cstdlib>

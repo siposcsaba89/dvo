@@ -1,4 +1,4 @@
-﻿// Validates monocular initialisation: motion against GT, depth against stereo after scale alignment.
+// Validates monocular initialisation: motion against GT, depth against stereo after scale alignment.
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
