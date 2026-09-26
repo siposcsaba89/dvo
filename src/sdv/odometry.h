@@ -45,6 +45,7 @@ struct MapPoint {
   float intensity;
   int frameIndex;  // input frame of the host keyframe
   Eigen::Vector2d uv;  // pixel in the host keyframe
+  double distance;  // from the host camera
 };
 
 struct OdometryFrameInfo {

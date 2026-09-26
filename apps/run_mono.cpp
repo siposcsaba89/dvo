@@ -8,6 +8,7 @@
 #include <fstream>
 #include <map>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include <boost/program_options.hpp>
@@ -27,7 +28,7 @@ namespace po = boost::program_options;
 int main(int argc, char** argv) {
   std::string sequenceDir, gtFile, outFile, plyFile, jsonFile, pngFile, colmapDir;
   bool colmapKeyframesOnly = false, colmapAlign = false;
-  double focalScale = 1.0;
+  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0;
   size_t start = 0, maxFrames = 100;
   bool verbose = false;
   sdv::OdometrySettings settings;
@@ -43,6 +44,10 @@ int main(int argc, char** argv) {
       ("colmap-keyframes", po::bool_switch(&colmapKeyframesOnly), "export keyframes only")
       ("colmap-align", po::bool_switch(&colmapAlign), "export in the GT-aligned frame (metres)")
       ("focal-scale", po::value(&focalScale)->default_value(1.0), "virtual pinhole focal scale for fisheye export")
+      ("max-distance-factor", po::value(&maxDistanceFactor)->default_value(5.0),
+       "drop map points farther than this times the median distance from their camera (0 = off)")
+      ("max-distance", po::value(&maxDistance)->default_value(0.0),
+       "drop map points farther than this from their camera, metres after alignment (0 = off)")
       ("json", po::value(&jsonFile), "write trajectory, GT, keyframes and map points as JSON (viewer data)")
       ("png", po::value(&pngFile), "write a top-down preview image")
       ("start", po::value(&start)->default_value(0), "first frame")
@@ -134,21 +139,37 @@ int main(int argc, char** argv) {
                    seg.numSegments);
     }
 
+    // A few points close to infinity would dominate any viewer; limit by distance from their host camera.
+    std::vector<sdv::MapPoint> mapPoints = vo.mapPoints();
+    if (!mapPoints.empty()) {
+      std::vector<double> distances;
+      for (const auto& p : mapPoints) distances.push_back(p.distance);
+      std::nth_element(distances.begin(), distances.begin() + distances.size() / 2, distances.end());
+      const double limit = maxDistanceFactor > 0 ? maxDistanceFactor * distances[distances.size() / 2]
+                                                 : std::numeric_limits<double>::infinity();
+      const size_t before = mapPoints.size();
+      std::erase_if(mapPoints, [&](const sdv::MapPoint& p) {
+        return p.distance > limit || (maxDistance > 0 && p.distance * alignment.scale > maxDistance);
+      });
+      spdlog::info("kept {} of {} map points (distance limit {:.1f} m{})", mapPoints.size(), before,
+                   std::min(limit * alignment.scale, maxDistance > 0 ? maxDistance : 1e30),
+                   gt.empty() ? ", unscaled units" : "");
+    }
+
     if (!plyFile.empty()) {
       sdv::PlyScene scene;
       std::vector<Sophus::SE3d> aligned = est;
       for (auto& p : aligned) p = alignment.applyToPose(p);
       scene.addTrajectory(aligned, {220, 0, 0});
       if (!gt.empty()) scene.addTrajectory(gt, {0, 200, 0});
-      for (const auto& p : vo.mapPoints()) {
+      for (const auto& p : mapPoints) {
         const auto v = static_cast<uint8_t>(std::clamp(p.intensity, 0.f, 255.f));
         scene.addPoint(alignment.apply(p.position), {v, v, v});
       }
       scene.write(plyFile);
-      spdlog::info("wrote {} ({} map points)", plyFile, vo.mapPoints().size());
+      spdlog::info("wrote {} ({} map points)", plyFile, mapPoints.size());
     }
 
-    const auto mapPoints = vo.mapPoints();
     if (!jsonFile.empty()) {
       std::ofstream out(jsonFile);
       auto writePath = [&](const char* name, const std::vector<Sophus::SE3d>& path, bool align) {

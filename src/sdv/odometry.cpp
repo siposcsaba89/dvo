@@ -231,7 +231,7 @@ void MonoOdometry::marginalize(int keyframeId) {
       m_marginalizedPoints.push_back({T_w_c * (p.bearing / p.rho),
                                       img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()),
                                                                static_cast<float>(p.pattern.uv.y())),
-                                      m_keyframeFrameIndex.at(keyframeId), p.pattern.uv});
+                                      m_keyframeFrameIndex.at(keyframeId), p.pattern.uv, 1.0 / p.rho});
   m_keyframePoses[keyframeId] = f.params.T_c_w;
   m_window.marginalizeFrame(keyframeId);
   m_keyframes.erase(keyframeId);
@@ -297,7 +297,7 @@ std::vector<MapPoint> MonoOdometry::mapPoints() const {
     const ImageLevel& img = f.image->level(0);
     out.push_back({f.params.T_c_w.inverse() * (p.bearing / p.rho),
                    img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()), static_cast<float>(p.pattern.uv.y())),
-                   m_keyframeFrameIndex.at(p.host), p.pattern.uv});
+                   m_keyframeFrameIndex.at(p.host), p.pattern.uv, 1.0 / p.rho});
   }
   return out;
 }
