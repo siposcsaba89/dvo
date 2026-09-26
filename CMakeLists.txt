@@ -26,6 +26,8 @@ add_library(sdv STATIC
   src/sdv/image_pyramid.cpp
   src/sdv/immature_point.h
   src/sdv/immature_point.cpp
+  src/sdv/mono_initializer.h
+  src/sdv/mono_initializer.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_selector.h
@@ -57,11 +59,15 @@ target_link_libraries(depth_test PRIVATE sdv Boost::program_options)
 add_executable(eval_traj apps/eval_traj.cpp)
 target_link_libraries(eval_traj PRIVATE sdv Boost::program_options)
 
+add_executable(mono_init apps/mono_init.cpp)
+target_link_libraries(mono_init PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
   tests/test_camera.cpp
   tests/test_immature_point.cpp
+  tests/test_mono_initializer.cpp
   tests/test_photometric.cpp
   tests/test_ply.cpp
   tests/test_point_selector.cpp

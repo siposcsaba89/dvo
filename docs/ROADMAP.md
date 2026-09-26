@@ -15,3 +15,9 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 8 | Export: poses + points in COLMAP text format (cameras/images/points3D) for GS / NeuS | load in a GS trainer |
 | 9 | Stereo extension (metric scale, better for driving) | KITTI ATE in metres |
 | 10 | Performance: multithreading, SIMD | real-time on KITTI |
+| 11 | Tuning pass once the full pipeline runs (items below) | KITTI ATE / drift, point accuracy |
+
+Deferred to step 11:
+- Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
+- Immature points: high outlier / ambiguous rates, error bound too optimistic (stereo inside interval only 29 %).
+- Fisheye validity mask and YAML camera config for non-KITTI data.
