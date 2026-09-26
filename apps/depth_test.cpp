@@ -122,7 +122,8 @@ int main(int argc, char** argv) {
     sdv::PlyScene scene;
     const Sophus::SE3d& T_w_h = gt[hostIndex];
     for (const auto& p : points) {
-      if (p.numGood() == 0 || p.lastErrorPixels() > convergedPixels) continue;
+      // rho = 0 is a valid match at infinity but has no finite position.
+      if (p.numGood() == 0 || p.lastErrorPixels() > convergedPixels || p.rho() <= 1e-6) continue;
       ++converged;
       const Eigen::Vector2i uv = p.pattern().uv.cast<int>();
       const float rs = stereoRho.at<float>(uv.y(), uv.x());

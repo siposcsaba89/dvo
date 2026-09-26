@@ -1,5 +1,7 @@
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 #include <gtest/gtest.h>
@@ -28,4 +30,16 @@ TEST(Ply, WritesVerticesAndEdges) {
   EXPECT_NE(text.find("element vertex 24"), std::string::npos);
   EXPECT_NE(text.find("element edge 13"), std::string::npos);
   std::filesystem::remove(file);
+}
+
+TEST(Ply, SkipsNonFiniteVertices) {
+  const double inf = std::numeric_limits<double>::infinity();
+  sdv::PlyScene scene;
+  EXPECT_TRUE(scene.addPoint({1, 2, 3}, {0, 0, 0}));
+  EXPECT_FALSE(scene.addPoint({std::nan(""), 0, 0}, {0, 0, 0}));
+  EXPECT_FALSE(scene.addPoint({0, inf, 0}, {0, 0, 0}));
+  EXPECT_FALSE(scene.addPoint({1e39, 0, 0}, {0, 0, 0}));  // overflows float
+  std::vector<Sophus::SE3d> traj = {Sophus::SE3d(), Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(inf, 0, 0)), Sophus::SE3d()};
+  scene.addTrajectory(traj, {255, 0, 0});
+  EXPECT_EQ(scene.numVertices(), 3u);
 }

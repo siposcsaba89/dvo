@@ -8,6 +8,9 @@ namespace sdv {
 
 namespace {
 
+// Points this close to infinity have no usable position for the map.
+constexpr double kMinMapRho = 1e-6;
+
 PointSelectorSettings selectorSettings(const OdometrySettings& s) {
   PointSelectorSettings p;
   p.targetPoints = s.candidatesPerKeyframe;
@@ -224,7 +227,7 @@ void MonoOdometry::marginalize(int keyframeId) {
   const Sophus::SE3d T_w_c = f.params.T_c_w.inverse();
   const ImageLevel& img = f.image->level(0);
   for (const auto& p : m_window.points())
-    if (p.host == keyframeId && p.numGood() > 0)
+    if (p.host == keyframeId && p.numGood() > 0 && p.rho > kMinMapRho)
       m_marginalizedPoints.push_back({T_w_c * (p.bearing / p.rho),
                                       img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()),
                                                                static_cast<float>(p.pattern.uv.y())),
@@ -289,7 +292,7 @@ std::vector<std::optional<Sophus::SE3d>> MonoOdometry::poses() const {
 std::vector<MapPoint> MonoOdometry::mapPoints() const {
   std::vector<MapPoint> out = m_marginalizedPoints;
   for (const auto& p : m_window.points()) {
-    if (p.numGood() == 0) continue;
+    if (p.numGood() == 0 || p.rho <= kMinMapRho) continue;
     const WindowFrame& f = m_window.frame(p.host);
     const ImageLevel& img = f.image->level(0);
     out.push_back({f.params.T_c_w.inverse() * (p.bearing / p.rho),

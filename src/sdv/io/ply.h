@@ -12,10 +12,10 @@ namespace sdv {
 
 using Rgb = std::array<uint8_t, 3>;
 
-// Coloured points plus line edges; trajectories become polylines.
+// Coloured points plus line edges; trajectories become polylines. Non-finite vertices are skipped.
 class PlyScene {
  public:
-  void addPoint(const Eigen::Vector3d& p, const Rgb& color);
+  bool addPoint(const Eigen::Vector3d& p, const Rgb& color);
   void addTrajectory(const std::vector<Sophus::SE3d>& T_w_c, const Rgb& color);
   // RGB = xyz camera axes of every `stride`-th pose.
   void addCameraAxes(const std::vector<Sophus::SE3d>& T_w_c, double length, size_t stride);

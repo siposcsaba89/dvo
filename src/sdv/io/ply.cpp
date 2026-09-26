@@ -8,18 +8,20 @@
 namespace sdv {
 
 int32_t PlyScene::addVertex(const Eigen::Vector3d& p, const Rgb& color) {
-  m_xyz.push_back(p.cast<float>());
+  const Eigen::Vector3f f = p.cast<float>();
+  if (!f.allFinite()) return -1;
+  m_xyz.push_back(f);
   m_rgb.push_back(color);
   return static_cast<int32_t>(m_rgb.size() - 1);
 }
 
-void PlyScene::addPoint(const Eigen::Vector3d& p, const Rgb& color) { addVertex(p, color); }
+bool PlyScene::addPoint(const Eigen::Vector3d& p, const Rgb& color) { return addVertex(p, color) >= 0; }
 
 void PlyScene::addTrajectory(const std::vector<Sophus::SE3d>& T_w_c, const Rgb& color) {
   int32_t prev = -1;
   for (const auto& T : T_w_c) {
     const int32_t v = addVertex(T.translation(), color);
-    if (prev >= 0) addEdge(prev, v);
+    if (prev >= 0 && v >= 0) addEdge(prev, v);
     prev = v;
   }
 }
@@ -31,7 +33,7 @@ void PlyScene::addCameraAxes(const std::vector<Sophus::SE3d>& T_w_c, double leng
     for (int k = 0; k < 3; ++k) {
       const int32_t a = addVertex(c, kAxisColors[k]);
       const int32_t b = addVertex(T_w_c[i] * (length * Eigen::Vector3d::Unit(k)), kAxisColors[k]);
-      addEdge(a, b);
+      if (a >= 0 && b >= 0) addEdge(a, b);
     }
   }
 }
