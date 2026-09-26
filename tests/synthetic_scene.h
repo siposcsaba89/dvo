@@ -47,4 +47,13 @@ inline cv::Mat renderTarget(const sdv::Camera& cam, const Sophus::SE3d& T_t_h, d
 // Inverse distance of the plane along the host bearing; <= 0 if the ray misses it.
 inline double trueRho(const Eigen::Vector3d& bearing) { return kNormal.dot(bearing) / kDist; }
 
+// Same for a camera at T_c_w, with the world frame being the host frame the texture is defined in.
+inline double trueRho(const Sophus::SE3d& T_c_w, const Eigen::Vector3d& bearing) {
+  const Sophus::SE3d T_w_c = T_c_w.inverse();
+  const double denom = kNormal.dot(T_w_c.so3() * bearing);
+  if (std::abs(denom) < 1e-9) return 0.0;
+  const double s = (kDist - kNormal.dot(T_w_c.translation())) / denom;
+  return s > 0 ? 1.0 / s : 0.0;
+}
+
 }  // namespace synthetic

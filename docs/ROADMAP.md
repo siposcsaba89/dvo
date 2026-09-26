@@ -21,3 +21,7 @@ Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
 - Immature points: high outlier / ambiguous rates, error bound too optimistic (stereo inside interval only 29 %).
 - Fisheye validity mask and YAML camera config for non-KITTI data.
+- Window BA on KITTI turns (frames 100-160): monocular scale shrinks ~1.5 % per keyframe relative to stereo
+  (Sim3 scale 0.93 over 100 frames); not reproduced synthetically, not caused by marginalisation, FEJ, window
+  size, point count or image periphery. Revisit after point management (step 7) and stereo residuals (step 9).
+- Window BA speed (~300 ms per keyframe with ~5000 points).

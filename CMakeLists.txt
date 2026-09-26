@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+﻿cmake_minimum_required(VERSION 3.25)
 project(sparse_direct_vo LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -36,6 +36,8 @@ add_library(sdv STATIC
   src/sdv/stereo_depth.cpp
   src/sdv/tracker.h
   src/sdv/tracker.cpp
+  src/sdv/window_optimizer.h
+  src/sdv/window_optimizer.cpp
   src/sdv/io/kitti.h
   src/sdv/io/kitti.cpp
   src/sdv/io/ply.h
@@ -62,6 +64,9 @@ target_link_libraries(eval_traj PRIVATE sdv Boost::program_options)
 add_executable(mono_init apps/mono_init.cpp)
 target_link_libraries(mono_init PRIVATE sdv Boost::program_options)
 
+add_executable(window_stereo apps/window_stereo.cpp)
+target_link_libraries(window_stereo PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
@@ -74,6 +79,7 @@ add_executable(sdv_tests
   tests/test_pyramid.cpp
   tests/test_tracker.cpp
   tests/test_trajectory.cpp
+  tests/test_window_optimizer.cpp
 )
 target_include_directories(sdv_tests PRIVATE tests)
 target_link_libraries(sdv_tests PRIVATE sdv GTest::gtest_main)
