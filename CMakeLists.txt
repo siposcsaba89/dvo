@@ -38,9 +38,13 @@ add_library(sdv STATIC
   src/sdv/stereo_depth.cpp
   src/sdv/tracker.h
   src/sdv/tracker.cpp
+  src/sdv/undistort.h
+  src/sdv/undistort.cpp
   src/sdv/window_optimizer.h
   src/sdv/window_optimizer.cpp
   src/sdv/io/kitti.h
+  src/sdv/io/colmap.h
+  src/sdv/io/colmap.cpp
   src/sdv/io/kitti.cpp
   src/sdv/io/ply.h
   src/sdv/io/ply.cpp
@@ -76,6 +80,7 @@ enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
   tests/test_camera.cpp
+  tests/test_colmap.cpp
   tests/test_immature_point.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp

@@ -43,7 +43,8 @@ struct OdometrySettings {
 struct MapPoint {
   Eigen::Vector3d position;  // world
   float intensity;
-  int keyframe;
+  int frameIndex;  // input frame of the host keyframe
+  Eigen::Vector2d uv;  // pixel in the host keyframe
 };
 
 struct OdometryFrameInfo {

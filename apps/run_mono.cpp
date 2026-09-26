@@ -2,7 +2,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <iostream>
 #include <string>
 
@@ -12,14 +16,18 @@
 #include <spdlog/spdlog.h>
 
 #include <sdv/eval/trajectory.h>
+#include <sdv/io/colmap.h>
 #include <sdv/io/kitti.h>
 #include <sdv/io/ply.h>
 #include <sdv/odometry.h>
+#include <sdv/undistort.h>
 
 namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
-  std::string sequenceDir, gtFile, outFile, plyFile, jsonFile, pngFile;
+  std::string sequenceDir, gtFile, outFile, plyFile, jsonFile, pngFile, colmapDir;
+  bool colmapKeyframesOnly = false, colmapAlign = false;
+  double focalScale = 1.0;
   size_t start = 0, maxFrames = 100;
   bool verbose = false;
   sdv::OdometrySettings settings;
@@ -31,6 +39,10 @@ int main(int argc, char** argv) {
       ("gt", po::value(&gtFile), "ground-truth poses for evaluation")
       ("out,o", po::value(&outFile), "write estimated poses (KITTI format, frames with a pose)")
       ("ply", po::value(&plyFile), "write trajectory, GT and map points (Sim3-aligned to GT if given)")
+      ("colmap", po::value(&colmapDir), "write a COLMAP text model (sparse/0) and images to this directory")
+      ("colmap-keyframes", po::bool_switch(&colmapKeyframesOnly), "export keyframes only")
+      ("colmap-align", po::bool_switch(&colmapAlign), "export in the GT-aligned frame (metres)")
+      ("focal-scale", po::value(&focalScale)->default_value(1.0), "virtual pinhole focal scale for fisheye export")
       ("json", po::value(&jsonFile), "write trajectory, GT, keyframes and map points as JSON (viewer data)")
       ("png", po::value(&pngFile), "write a top-down preview image")
       ("start", po::value(&start)->default_value(0), "first frame")
@@ -163,6 +175,51 @@ int main(int argc, char** argv) {
       }
       out << "]}";
       spdlog::info("wrote {}", jsonFile);
+    }
+
+    if (!colmapDir.empty()) {
+      const std::filesystem::path root(colmapDir);
+      const sdv::Camera& cam = seq.camera();
+      const sdv::Camera exportCam = cam.isPinhole() ? cam : sdv::virtualPinhole(cam, focalScale);
+      const auto undistortMap = cam.isPinhole() ? sdv::UndistortMap{} : sdv::makeUndistortMap(cam, exportCam);
+      std::filesystem::create_directories(root / "images");
+      const sdv::SimilarityTransform exportAlignment = colmapAlign ? alignment : sdv::SimilarityTransform{};
+
+      const auto keyframeIndices = vo.keyframeIndices();
+      std::vector<sdv::ColmapImage> images;
+      std::map<int, size_t> imageOfFrame;
+      for (size_t i = 0; i < poses.size(); ++i) {
+        if (!poses[i]) continue;
+        if (colmapKeyframesOnly &&
+            std::find(keyframeIndices.begin(), keyframeIndices.end(), static_cast<int>(i)) == keyframeIndices.end())
+          continue;
+        const std::string name = fmt::format("{:06d}.png", start + i);
+        cv::Mat img = seq.loadImage(start + i, 0);
+        if (!cam.isPinhole()) img = sdv::undistort(img, undistortMap);
+        // GS trainers expect 3-channel images.
+        if (img.channels() == 1) cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+        cv::imwrite((root / "images" / name).string(), img);
+        imageOfFrame[static_cast<int>(i)] = images.size();
+        images.push_back({static_cast<int>(images.size()) + 1, name, exportAlignment.applyToPose(*poses[i]).inverse(), {}});
+      }
+
+      std::vector<sdv::ColmapPoint> points;
+      for (const auto& m : mapPoints) {
+        const Eigen::Vector3d X = exportAlignment.apply(m.position);
+        const auto v = static_cast<std::uint8_t>(std::clamp(m.intensity, 0.f, 255.f));
+        sdv::ColmapPoint p{static_cast<std::int64_t>(points.size()) + 1, X, {v, v, v}};
+        if (const auto it = imageOfFrame.find(m.frameIndex); it != imageOfFrame.end()) {
+          sdv::ColmapImage& img = images[it->second];
+          Eigen::Vector2d uv;
+          if (exportCam.project(img.T_c_w * X, uv) && exportCam.isInside(uv.x(), uv.y(), 0.0)) {
+            p.track.emplace_back(img.id, static_cast<int>(img.points2D.size()));
+            img.points2D.emplace_back(uv, p.id);
+          }
+        }
+        points.push_back(std::move(p));
+      }
+      sdv::writeColmapText(root / "sparse" / "0", exportCam, images, points);
+      spdlog::info("wrote COLMAP model to {}: {} images, {} points", root.string(), images.size(), points.size());
     }
 
     if (!pngFile.empty()) {
