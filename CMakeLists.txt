@@ -14,7 +14,7 @@ endif()
 
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(Sophus CONFIG REQUIRED)
-find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
 find_package(GTest CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
@@ -26,6 +26,10 @@ add_library(sdv STATIC
   src/sdv/image_pyramid.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
+  src/sdv/stereo_depth.h
+  src/sdv/stereo_depth.cpp
+  src/sdv/tracker.h
+  src/sdv/tracker.cpp
   src/sdv/io/kitti.h
   src/sdv/io/kitti.cpp
   src/sdv/io/ply.h
@@ -35,10 +39,13 @@ add_library(sdv STATIC
 )
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
-  opencv_core opencv_imgproc opencv_imgcodecs)
+  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
+
+add_executable(track_stereo apps/track_stereo.cpp)
+target_link_libraries(track_stereo PRIVATE sdv Boost::program_options)
 
 add_executable(eval_traj apps/eval_traj.cpp)
 target_link_libraries(eval_traj PRIVATE sdv Boost::program_options)
@@ -49,6 +56,7 @@ add_executable(sdv_tests
   tests/test_photometric.cpp
   tests/test_ply.cpp
   tests/test_pyramid.cpp
+  tests/test_tracker.cpp
   tests/test_trajectory.cpp
 )
 target_link_libraries(sdv_tests PRIVATE sdv GTest::gtest_main)
