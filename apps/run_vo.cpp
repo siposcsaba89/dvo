@@ -37,7 +37,7 @@ namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
   std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, jsonFile, pngFile,
-      colmapDir;
+      colmapDir, keyframesFile;
   std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
   double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, scale = 1.0, maxDepthSigma = 0.0,
@@ -104,6 +104,10 @@ int main(int argc, char** argv) {
        "also map converged candidates that were never activated")
       ("candidate-interval", po::value(&settings.candidateMaxInterval)->default_value(settings.candidateMaxInterval),
        "largest relative inverse-depth half interval of mapped candidates")
+      ("keyframes-out", po::value(&keyframesFile),
+       "write keyframe records (ORB features with map depth per camera, poses, rig) for place recognition")
+      ("features", po::value(&settings.features.featuresPerImage)->default_value(settings.features.featuresPerImage),
+       "ORB features per keyframe image")
       ("densify", po::bool_switch(&densify), "semi-dense mapping pass with the final poses after odometry")
       ("densify-scale", po::value(&denseScale)->default_value(0.0), "image scale of the densify pass (0 = --scale)")
       ("densify-points", po::value(&dense.pointsPerImage)->default_value(dense.pointsPerImage),
@@ -143,6 +147,7 @@ int main(int argc, char** argv) {
   }
   if (verbose || trace) spdlog::set_level(trace ? spdlog::level::trace : spdlog::level::debug);
   settings.checkCalibration = checkCalibration;
+  settings.extractFeatures = !keyframesFile.empty();
 
   try {
     if (!sequenceDir.empty() + !videoFile.empty() + !imageDir.empty() + !rigFile.empty() != 1)
@@ -270,6 +275,16 @@ int main(int argc, char** argv) {
     }
     spdlog::info("{} of {} frames have a pose", est.size(), poses.size());
     if (!outFile.empty()) sdv::saveKittiPoses(outFile, est);
+    if (!keyframesFile.empty()) {
+      const auto records = vo.keyframeRecords();
+      size_t features = 0, withDepth = 0;
+      for (const auto& r : records)
+        for (const auto& f : r.cameras) features += f.size(), withDepth += f.numWithDepth();
+      sdv::saveKeyframeRecords(keyframesFile, rig, records);
+      spdlog::info("wrote {}: {} keyframes, {:.0f} features per image, {:.0f} % with depth", keyframesFile,
+                   records.size(), static_cast<double>(features) / std::max<size_t>(records.size() * rig.size(), 1),
+                   100.0 * withDepth / std::max<size_t>(features, 1));
+    }
 
     sdv::SimilarityTransform alignment;
     std::string metrics = fmt::format(R"("cameras":{},"frames":{},"start":{},"stride":{},"keyframes":{},"msPerFrame":{:.1f})",

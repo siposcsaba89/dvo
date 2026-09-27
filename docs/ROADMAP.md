@@ -18,6 +18,10 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 11 | Tuning pass once the full pipeline runs (items below) | KITTI ATE / drift, point accuracy |
 | 12 | Multi-camera rig: body poses, per-camera brightness, cross-camera residuals, rig YAML, multi-camera export | KITTI stereo as a 2-camera rig; synthetic surround rig metric; own rig |
 | 13 | Denser point clouds: converged candidates as map points; semi-dense mapping pass with the final poses | synthetic depth accuracy; Prodigy garage |
+| 14 | Place recognition: ORB features with map depth per keyframe camera, keyframe records, FBoW vocabulary, inverted-file database | retrieval on KITTI 00 (GT) and the garage laps |
+| 15 | Loop detection: cross-camera candidates, rig P3P RANSAC, odometry-consistency and temporal checks | no false loops on KITTI 00 / garage / multi-floor |
+| 16 | Pose graph (Ceres, SE3) over keyframes with loop edges; frames and points follow | KITTI 00 full ATE, garage lap consistency |
+| 17 | Global bundle adjustment over all keyframes (optional) | cross-lap geometry |
 
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
@@ -168,3 +172,26 @@ bias +-0.06 % across the image radius: the sensorconfig calibration is consisten
 - Prodigy garage, lap 1 (850 frames, F/L/B fisheyes, half resolution): 73k active + 105k candidate + 374k semi-dense
   points, 493k after filtering (27k before). Densify pass ~200 ms/frame. Remaining: some haze at the ceiling,
   textureless floor stays empty, no dynamic-object masks yet. `render_cloud` renders a PLY view to PNG.
+
+## Step 14 log
+
+Loop closure works offline on keyframe records (`run_vo --keyframes-out file.kfr`): at marginalisation every keyframe
+camera gets ~1000 ORB keypoints (grid-spread, masked) whose depth comes from the window points and converged
+candidates projected into it (only where neighbours within 3 px agree to 5 %), plus the final body pose and the rig.
+The interfaces are incremental (add a keyframe, query the earlier ones), so an online version can reuse them.
+FBoW (MIT) provides the vocabulary; the inverted-file database with the L1 score and the normalisation by the
+previous keyframe follow Nister & Stewenius 2006 and Galvez-Lopez & Tardos 2012. `train_vocabulary` trains on
+records; `place_recall` measures top-1 retrieval against ground truth or the odometry poses (5 m, 150+ frames older,
+every camera against every camera).
+
+| Data | Keyframes | Revisit queries | Top-1 correct | Normalised score >= 1.0: accepted / correct |
+|------|-----------|-----------------|---------------|---------------------------------------------|
+| KITTI 00 stereo | 2653 | 479 | 93 % | 388 / 381 |
+| Garage, F/L/B fisheyes, both laps | 180 | 84 | 80 % | 28 / 22 |
+| Garage, KITTI-only vocabulary | 180 | 84 | 69 % | 36 / 26 |
+
+Vocabulary k=10, 5 levels, trained on 3000 images of both sequences. Garage revisits run in the opposite direction:
+56 of 67 correct matches are front against rear camera, which a single camera cannot find. A domain vocabulary helps
+(69 -> 80 %); it should be trained on other aiMotive recordings than the test one. Score thresholds alone are not
+precise enough (garage: 6 wrong of 28 at 1.0), so step 15 verifies geometrically. KITTI 00 full-sequence baseline
+before loop closure: ATE SE3 3.95 m.

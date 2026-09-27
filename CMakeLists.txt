@@ -14,12 +14,13 @@ endif()
 
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(Sophus CONFIG REQUIRED)
-find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d videoio)
+find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d videoio features2d)
 find_package(GTest CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
 find_package(tinyply CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
+find_package(fbow CONFIG REQUIRED)
 
 add_library(sdv STATIC
   src/sdv/camera.h
@@ -27,6 +28,8 @@ add_library(sdv STATIC
   src/sdv/image_pyramid.cpp
   src/sdv/immature_point.h
   src/sdv/immature_point.cpp
+  src/sdv/keyframe_features.h
+  src/sdv/keyframe_features.cpp
   src/sdv/mono_initializer.h
   src/sdv/mono_initializer.cpp
   src/sdv/map_point.h
@@ -35,6 +38,8 @@ add_library(sdv STATIC
   src/sdv/semi_dense_mapper.h
   src/sdv/semi_dense_mapper.cpp
   src/sdv/parallel.h
+  src/sdv/place_database.h
+  src/sdv/place_database.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_selector.h
@@ -68,7 +73,8 @@ add_library(sdv STATIC
 )
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
-  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio yaml-cpp::yaml-cpp)
+  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio opencv_features2d yaml-cpp::yaml-cpp
+  PRIVATE fbow::fbow)
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
@@ -103,6 +109,12 @@ target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
 add_executable(render_cloud apps/render_cloud.cpp)
 target_link_libraries(render_cloud PRIVATE sdv Boost::program_options)
 
+add_executable(train_vocabulary apps/train_vocabulary.cpp)
+target_link_libraries(train_vocabulary PRIVATE sdv Boost::program_options)
+
+add_executable(place_recall apps/place_recall.cpp)
+target_link_libraries(place_recall PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
@@ -110,6 +122,8 @@ add_executable(sdv_tests
   tests/test_colmap.cpp
   tests/test_camera_config.cpp
   tests/test_immature_point.cpp
+  tests/test_keyframe_features.cpp
+  tests/test_place_database.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp
   tests/test_photometric.cpp

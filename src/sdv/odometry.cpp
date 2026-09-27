@@ -414,7 +414,49 @@ void Odometry::appendCandidatePoints(int keyframeId, std::vector<MapPoint>& out)
   }
 }
 
+KeyframeRecord Odometry::makeRecord(int keyframeId) const {
+  const Keyframe& kf = m_keyframes.at(keyframeId);
+  KeyframeRecord rec{kf.frameIndex, m_window.frame(keyframeId).params.T_b_w.inverse(), {}};
+  for (int c = 0; c < m_rig.size(); ++c) {
+    const Camera& cam = m_rig.cameras[c];
+    CameraFeatures f = extractFeatures(cam, toGray8(kf.images[c]->level(0)), m_settings.features);
+    // Depth from all window points that project into this camera, plus its own converged candidates.
+    const Sophus::SE3d T_c_w = m_window.cameraPose(keyframeId, c);
+    std::vector<Eigen::Vector2f> uv;
+    std::vector<float> rho;
+    auto addPoint = [&](const Sophus::SE3d& T_c_h, const Eigen::Vector3d& bearing, double r) {
+      const Eigen::Vector3d x = T_c_h.so3() * bearing + r * T_c_h.translation();
+      Eigen::Vector2d q;
+      if (x.norm() < 1e-9 || !cam.project(x, q) || !cam.isInside(q.x(), q.y(), 0.0)) return;
+      uv.push_back(q.cast<float>());
+      rho.push_back(static_cast<float>(r / x.norm()));
+    };
+    for (const auto& p : m_window.points())
+      if (p.numGood() > 0 && p.rho > kMinMapRho)
+        addPoint(T_c_w * m_window.cameraPose(p.host, p.hostCam).inverse(), p.bearing, p.rho);
+    for (const auto& p : kf.immature[c])
+      if (p.numGood() >= m_settings.candidateMinGood && p.rho() > kMinMapRho &&
+          0.5 * (p.rhoMax() - p.rhoMin()) / p.rho() <= m_settings.candidateMaxInterval)
+        addPoint(Sophus::SE3d(), p.bearing(), p.rho());
+    assignDepth(f, uv, rho, m_settings.features);
+    rec.cameras.push_back(std::move(f));
+  }
+  return rec;
+}
+
+std::vector<KeyframeRecord> Odometry::keyframeRecords() const {
+  std::vector<KeyframeRecord> out = m_records;
+  if (m_settings.extractFeatures)
+    for (const auto& [id, kf] : m_keyframes) out.push_back(makeRecord(id));
+  std::sort(out.begin(), out.end(), [](const KeyframeRecord& a, const KeyframeRecord& b) { return a.frameIndex < b.frameIndex; });
+  return out;
+}
+
 void Odometry::marginalize(int keyframeId) {
+  if (m_settings.extractFeatures) {
+    auto t = m_profile.scope("kf features");
+    m_records.push_back(makeRecord(keyframeId));
+  }
   for (const auto& p : m_window.points())
     if (p.host == keyframeId && p.numGood() > 0 && p.rho > kMinMapRho) m_marginalizedPoints.push_back(mapPoint(p));
   appendCandidatePoints(keyframeId, m_marginalizedPoints);

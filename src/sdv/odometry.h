@@ -11,6 +11,7 @@
 
 #include <sdv/camera.h>
 #include <sdv/immature_point.h>
+#include <sdv/keyframe_features.h>
 #include <sdv/map_point.h>
 #include <sdv/mono_initializer.h>
 #include <sdv/point_selector.h>
@@ -48,6 +49,9 @@ struct OdometrySettings {
   bool mapCandidates = false;
   int candidateMinGood = 2;
   double candidateMaxInterval = 0.05;  // half width of the inverse-depth interval relative to the inverse depth
+  // ORB features with map depth per keyframe camera, for place recognition and loop closure.
+  bool extractFeatures = false;
+  FeatureSettings features;
 };
 
 struct OdometryFrameInfo {
@@ -79,6 +83,8 @@ class Odometry {
   // Marginalised points plus the active points still in the window (and converged candidates, see mapCandidates).
   std::vector<MapPoint> mapPoints() const;
   std::vector<int> keyframeIndices() const;
+  // With extractFeatures: one record per keyframe in input order, taken when the keyframe leaves the window.
+  std::vector<KeyframeRecord> keyframeRecords() const;
   const Rig& rig() const { return m_rig; }
   const StageProfile& profile() const { return m_profile; }
 
@@ -113,6 +119,7 @@ class Odometry {
   void storeKeyframePoses();
   MapPoint mapPoint(const WindowPoint& p) const;
   void appendCandidatePoints(int keyframeId, std::vector<MapPoint>& out) const;
+  KeyframeRecord makeRecord(int keyframeId) const;
 
   Rig m_rig;
   OdometrySettings m_settings;
@@ -132,6 +139,7 @@ class Odometry {
   std::map<int, int> m_keyframeFrameIndex;
   std::vector<FrameRecord> m_frames;
   std::vector<MapPoint> m_marginalizedPoints;
+  std::vector<KeyframeRecord> m_records;
 
   std::vector<ReferenceFrame> m_reference;  // per camera
   int m_referenceId = -1;
