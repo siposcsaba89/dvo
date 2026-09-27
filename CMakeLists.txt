@@ -58,6 +58,8 @@ add_library(sdv STATIC
   src/sdv/io/kitti.cpp
   src/sdv/io/ply.h
   src/sdv/io/ply.cpp
+  src/sdv/io/rig_config.h
+  src/sdv/io/rig_config.cpp
   src/sdv/eval/trajectory.h
   src/sdv/eval/trajectory.cpp
 )

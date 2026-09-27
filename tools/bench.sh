@@ -25,7 +25,7 @@ printf "%6s %8s %8s %8s %8s %6s %7s %8s %6s\n" start ate_sim3 ate_se3 drift_t dr
 for s in $starts; do
   awk -v s="$s" '
     /ATE Sim3/ { for (i=1;i<=NF;i++) { if ($i=="rmse" && !sim) sim=$(i+1); if ($i=="scale") sc=$(i+1); if ($i=="t") dt=$(i+1); if ($i=="r") dr=$(i+1) } }
-    /stereo, metric/ { for (i=1;i<=NF;i++) if ($i=="rmse") se3=$(i+1) }
+    /metric: ATE SE3/ { for (i=1;i<=NF;i++) if ($i=="rmse") se3=$(i+1) }
     /RPE 1 frame/ { for (i=1;i<=NF;i++) { if ($i=="rmse") rt=$(i+1); if ($i=="cm,") rr=$(i+1) } }
     /ms\/frame \(max/ { for (i=1;i<=NF;i++) if ($i=="ms/frame") ms=$(i-1) }
     END { if (se3=="") se3="-"; printf "%6d %8s %8s %8s %8s %6s %7s %8s %6s\n", s, sim, se3, dt, dr, sc, rt, rr, ms }' "$out/$s.log"

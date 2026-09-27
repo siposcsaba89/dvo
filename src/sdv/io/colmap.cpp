@@ -17,17 +17,19 @@ std::ofstream openFile(const std::filesystem::path& path) {
 
 }  // namespace
 
-void writeColmapText(const std::filesystem::path& dir, const Camera& cam, const std::vector<ColmapImage>& images,
-                     const std::vector<ColmapPoint>& points) {
-  if (!cam.isPinhole()) throw std::invalid_argument("COLMAP export expects a pinhole camera; undistort first");
+void writeColmapText(const std::filesystem::path& dir, const std::vector<Camera>& cams,
+                     const std::vector<ColmapImage>& images, const std::vector<ColmapPoint>& points) {
+  for (const auto& cam : cams)
+    if (!cam.isPinhole()) throw std::invalid_argument("COLMAP export expects pinhole cameras; undistort first");
   std::filesystem::create_directories(dir);
 
   auto cameras = openFile(dir / "cameras.txt");
   cameras << "# Camera list with one line of data per camera:\n"
           << "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n"
-          << "# Number of cameras: 1\n"
-          << fmt::format("1 PINHOLE {} {} {:.6f} {:.6f} {:.6f} {:.6f}\n", cam.width, cam.height, cam.fx, cam.fy,
-                         cam.cx, cam.cy);
+          << fmt::format("# Number of cameras: {}\n", cams.size());
+  for (size_t i = 0; i < cams.size(); ++i)
+    cameras << fmt::format("{} PINHOLE {} {} {:.6f} {:.6f} {:.6f} {:.6f}\n", i + 1, cams[i].width, cams[i].height,
+                           cams[i].fx, cams[i].fy, cams[i].cx, cams[i].cy);
 
   size_t numObservations = 0;
   for (const auto& img : images) numObservations += img.points2D.size();
@@ -41,8 +43,8 @@ void writeColmapText(const std::filesystem::path& dir, const Camera& cam, const 
     // COLMAP stores world-to-camera rotation as a Hamilton quaternion (w first) and translation.
     const Eigen::Quaterniond q = img.T_c_w.unit_quaternion();
     const Eigen::Vector3d& t = img.T_c_w.translation();
-    imageFile << fmt::format("{} {:.9f} {:.9f} {:.9f} {:.9f} {:.6f} {:.6f} {:.6f} 1 {}\n", img.id, q.w(), q.x(), q.y(),
-                             q.z(), t.x(), t.y(), t.z(), img.name);
+    imageFile << fmt::format("{} {:.9f} {:.9f} {:.9f} {:.9f} {:.6f} {:.6f} {:.6f} {} {}\n", img.id, q.w(), q.x(), q.y(),
+                             q.z(), t.x(), t.y(), t.z(), img.cameraId, img.name);
     for (size_t i = 0; i < img.points2D.size(); ++i) {
       const auto& [uv, id] = img.points2D[i];
       imageFile << fmt::format("{}{:.2f} {:.2f} {}", i ? " " : "", uv.x(), uv.y(), id);

@@ -16,6 +16,7 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 9 | Stereo extension (metric scale, better for driving) | KITTI ATE in metres |
 | 10 | Performance: multithreading, SIMD (done: multithreading, see log) | real-time on KITTI |
 | 11 | Tuning pass once the full pipeline runs (items below) | KITTI ATE / drift, point accuracy |
+| 12 | Multi-camera rig: body poses, per-camera brightness, cross-camera residuals, rig YAML, multi-camera export | KITTI stereo as a 2-camera rig; synthetic surround rig metric; own rig |
 
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
@@ -120,3 +121,25 @@ Own data (step 11 inputs): `run_vo --video file.h264 --camera cam.yaml --scale 0
 obstruction mask (config/camera_example.yaml). aiMotive front fisheye, underground garage, 1886 frames at 960x608:
 1826 posed (the first 60 are before monocular initialisation), 248 keyframes, 72.6k points, ~90 ms/frame, no weak
 tracking. No ground truth; open: calibration pixel-centre convention, metric scale from the camera height.
+
+## Step 12 log
+
+A keyframe is a rig snapshot: one body pose (vehicle frame x forward, y left, z up) and affine brightness per
+camera (6 + 2C parameters). A point is hosted in one camera of one keyframe (bearing + inverse distance) and has
+residuals in every camera of every other keyframe and in the other cameras of its own keyframe (static residuals,
+the former stereo residual, which only depend on depth and brightness). Frame Jacobians go through the extrinsic
+adjoint (numeric test). Tracking estimates the body motion and per-camera brightness from all cameras. New keyframes
+match their candidates into the other cameras (metric depth); activation checks occupancy in all cameras of the new
+keyframe, so a surface seen by two cameras is hosted once (no ghost copies from double hosting).
+
+- KITTI 00 stereo through the rig path, nine 500-frame segments: ATE SE3 0.490 m, 0.80 % / 0.435 deg/100m (stereo
+  code before: 0.500 m, 0.78 % / 0.425); with 1000 points per camera 0.545 m / 0.81 % / 0.486. Both images are now
+  processed fully (pyramids, tracking, residuals into right images of all keyframes): ~2x time per frame.
+- Synthetic surround room: front/left/right fisheye rig tracks metrically without alignment; a front/rear rig
+  without common view recovers metric scale only in turns (0.1 rad per keyframe: 0.1 % scale error; 0.04 rad: 3 %
+  bias from rendering noise), as expected from Clipp et al. 2008. Straight driving needs overlapping cameras.
+- Input: `run_vo --rig rig.yaml [--rig-cameras front left ...]` (config/rig_example.yaml), COLMAP export with one
+  camera model and image folder per camera.
+
+Open: cross-camera tracing of immature points (candidates are traced only in their own camera over time), real rig
+data (extrinsics, synchronisation), dynamic-object masks, SIMD for the larger residual counts.

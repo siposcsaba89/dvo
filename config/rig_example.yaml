@@ -1,0 +1,32 @@
+# Rig for run_vo --rig: cameras rigidly mounted on the vehicle, one synchronised video per camera.
+# Body (vehicle) frame: x forward, y left, z up. Camera frames: OpenCV (z forward, x right, y down).
+# T_body_camera maps camera coordinates to body coordinates (the camera pose in the body frame).
+# Relative paths are relative to this file. Trajectories are written as body poses; the world frame is the body
+# frame of the first frame (z up).
+cameras:
+  - name: front
+    camera: front_fisheye.yaml        # camera YAML as for --camera (EUCM intrinsics, optional mask)
+    video: front.h264
+    T_body_camera:
+      translation: [2.0, 0.0, 1.1]    # metres
+      # Looking forward: camera z = body x, camera x = body -y, camera y = body -z.
+      rotation_matrix: [0, 0, 1,
+                        -1, 0, 0,
+                        0, -1, 0]
+  - name: left
+    camera:                           # intrinsics can also be given inline
+      width: 1920
+      height: 1208
+      fx: 430.0
+      fy: 430.0
+      cx: 959.5
+      cy: 603.5
+      alpha: 0.58
+      beta: 0.83
+      mask: left_mask.png
+    video: left.h264
+    frame_offset: 0                   # frames to skip at the start of this stream to synchronise it
+    T_body_camera:
+      translation: [1.0, 0.9, 1.0]
+      # Looking left: camera z = body y, camera x = body x, camera y = body -z (-90 deg about body x).
+      rotation_quaternion_wxyz: [0.70710678, -0.70710678, 0.0, 0.0]

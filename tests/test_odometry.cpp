@@ -1,3 +1,5 @@
+#include <optional>
+
 #include <gtest/gtest.h>
 #include <opencv2/imgproc.hpp>
 
@@ -58,6 +60,42 @@ TEST_P(OdometryTest, TracksSyntheticSequence) {
   EXPECT_GT(vo.mapPoints().size(), 500u);
 }
 
+// A single camera mounted on a body: the body poses map back to the same camera trajectory.
+TEST_P(OdometryTest, MountedCameraGivesSameCameraTrajectory) {
+  const sdv::Camera& cam = GetParam();
+  sdv::OdometrySettings settings;
+  settings.levels = 4;
+  settings.init.pointsLevel0 = 800;
+  settings.candidatesPerKeyframe = 600;
+  settings.targetActivePoints = 800;
+  settings.kfFlow = 20.0;
+  settings.kfTranslationFlow = 8.0;
+  const Sophus::SE3d T_c_b = Sophus::SE3d::exp((Sophus::Vector6d() << 0.3, -1.2, 2.0, 1.2, -0.3, 0.8).finished());
+  sdv::Odometry plain(cam, settings);
+  sdv::Odometry mounted(sdv::Rig{{cam}, {T_c_b}}, settings);
+  const Sophus::Vector6d v = (Sophus::Vector6d() << -0.06, 0.01, -0.03, 0.001, 0.004, 0.0).finished();
+  for (int k = 0; k < 20; ++k) {
+    cv::Mat img = synthetic::renderTarget(cam, Sophus::SE3d::exp(k * v));
+    cv::GaussianBlur(img, img, cv::Size(0, 0), 1.0);
+    plain.addFrame(img);
+    mounted.addFrame(img);
+  }
+  const auto a = plain.poses(), b = mounted.poses();
+  std::optional<Sophus::SE3d> firstA, firstB;
+  int compared = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    ASSERT_EQ(a[i].has_value(), b[i].has_value()) << "frame " << i;
+    if (!a[i]) continue;
+    const Sophus::SE3d camA = *a[i], camB = *b[i] * T_c_b.inverse();  // T_w_c
+    if (!firstA) firstA = camA, firstB = camB;
+    const Sophus::SE3d relA = firstA->inverse() * camA, relB = firstB->inverse() * camB;
+    EXPECT_LT((relA.translation() - relB.translation()).norm(), 1e-3 + 0.01 * relA.translation().norm()) << i;
+    EXPECT_LT((relA.so3() * relB.so3().inverse()).log().norm(), 1e-3) << i;
+    ++compared;
+  }
+  EXPECT_GT(compared, 10);
+}
+
 TEST_P(OdometryTest, StereoIsMetric) {
   const sdv::Camera& cam = GetParam();
   sdv::OdometrySettings settings;
@@ -100,3 +138,47 @@ INSTANTIATE_TEST_SUITE_P(Cameras, OdometryTest,
                          ::testing::Values(sdv::Camera::pinhole(250, 250, 159.5, 119.5, kW, kH),
                                            sdv::Camera::eucm(140, 140, 160.2, 119.7, 0.6, 1.1, kW, kH)),
                          [](const auto& info) { return info.param.isPinhole() ? "Pinhole" : "Fisheye"; });
+
+// Front, left and right fisheye with overlapping views in a closed room: metric trajectory without any alignment.
+TEST(OdometryRig, SurroundFisheyeRigIsMetric) {
+  const sdv::Camera cam = sdv::Camera::eucm(140, 140, 160.2, 119.7, 0.6, 1.1, kW, kH);
+  const sdv::Rig rig{{cam, cam, cam},
+                     {synthetic::room::cameraFromBody(0.0, {1.5, 0.0, 0.5}),
+                      synthetic::room::cameraFromBody(M_PI / 2, {0.5, 0.4, 0.5}),
+                      synthetic::room::cameraFromBody(-M_PI / 2, {0.5, -0.4, 0.5})}};
+  sdv::OdometrySettings settings;
+  settings.levels = 4;
+  settings.candidatesPerKeyframe = 600;
+  settings.targetActivePoints = 500;
+  settings.kfFlow = 20.0;
+  settings.kfTranslationFlow = 8.0;
+  sdv::Odometry vo(rig, settings);
+
+  std::vector<Sophus::SE3d> truth;  // T_w_b
+  for (int k = 0; k < 30; ++k) {
+    const Sophus::SE3d T_w_b = Sophus::SE3d::exp((Sophus::Vector6d() << 0.1 * k, 0, 0, 0, 0, 0.01 * k).finished());
+    truth.push_back(T_w_b);
+    std::vector<cv::Mat> images;
+    for (int c = 0; c < rig.size(); ++c) {
+      cv::Mat img = synthetic::room::render(cam, rig.T_c_b[c] * T_w_b.inverse());
+      cv::GaussianBlur(img, img, cv::Size(0, 0), 1.0);
+      images.push_back(img);
+    }
+    vo.addFrame(images);
+  }
+  const auto poses = vo.poses();
+  ASSERT_TRUE(poses.front().has_value());  // several cameras initialise on the first frame
+  const double length = (truth.back().translation() - truth.front().translation()).norm();
+  double sumSq = 0;
+  for (size_t i = 0; i < poses.size(); ++i) {
+    ASSERT_TRUE(poses[i].has_value()) << "frame " << i;
+    const double err = (poses[i]->translation() - truth[i].translation()).norm();
+    EXPECT_LT(err, 0.02 * length) << "frame " << i;
+    EXPECT_LT((poses[i]->so3() * truth[i].so3().inverse()).log().norm(), 2e-3) << "frame " << i;
+    sumSq += err * err;
+  }
+  EXPECT_LT(std::sqrt(sumSq / poses.size()), 0.01 * length);
+  std::vector<int> perCamera(rig.size(), 0);
+  for (const auto& p : vo.mapPoints()) ++perCamera[p.camera];
+  for (int c = 0; c < rig.size(); ++c) EXPECT_GT(perCamera[c], 100) << "camera " << c;
+}

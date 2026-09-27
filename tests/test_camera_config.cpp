@@ -10,6 +10,7 @@
 #include <sdv/camera.h>
 #include <sdv/io/camera_config.h>
 #include <sdv/io/frame_source.h>
+#include <sdv/io/rig_config.h>
 #include <sdv/validity_mask.h>
 
 namespace {
@@ -75,6 +76,46 @@ TEST(CameraConfig, LoadsYamlAndMask) {
 
   std::ofstream(dir / "bad.yaml") << "width: 200\nheight: 100\nfx: 80\n";
   EXPECT_THROW(sdv::loadCameraConfig(dir / "bad.yaml"), std::runtime_error);
+}
+
+TEST(RigConfig, LoadsCamerasAndExtrinsics) {
+  const auto dir = tempDir("rig_config");
+  std::ofstream(dir / "front.yaml") << "width: 200\nheight: 100\nfx: 80\nfy: 80\ncx: 99.5\ncy: 49.5\nalpha: 0.5\n";
+  // Front camera looking along body x (camera z), rear camera turned by 180 deg about body z.
+  std::ofstream(dir / "rig.yaml")
+      << "cameras:\n"
+         "  - name: front\n"
+         "    camera: front.yaml\n"
+         "    video: front.h264\n"
+         "    T_body_camera:\n"
+         "      translation: [2.0, 0.1, 1.5]\n"
+         "      rotation_matrix: [0, 0, 1, -1, 0, 0, 0, -1, 0]\n"
+         "  - name: rear\n"
+         "    camera: {width: 200, height: 100, fx: 70, fy: 70, cx: 99.5, cy: 49.5}\n"
+         "    video: " + std::filesystem::absolute("/abs/rear.h264").generic_string() + "\n"
+         "    frame_offset: 3\n"
+         "    T_body_camera:\n"
+         "      translation: [-1.0, 0.0, 1.2]\n"
+         "      rotation_quaternion_wxyz: [0.5, -0.5, -0.5, 0.5]\n";
+  const sdv::RigConfig rig = sdv::loadRigConfig(dir / "rig.yaml");
+  ASSERT_EQ(rig.cameras.size(), 2u);
+  const auto& front = rig.cameras[0];
+  EXPECT_EQ(front.name, "front");
+  EXPECT_DOUBLE_EQ(front.camera.camera.alpha, 0.5);
+  EXPECT_EQ(front.video, dir / "front.h264");
+  EXPECT_EQ(front.frameOffset, 0);
+  EXPECT_TRUE((front.T_b_c * Eigen::Vector3d(0, 0, 1) - Eigen::Vector3d(3.0, 0.1, 1.5)).norm() < 1e-9);
+  const auto& rear = rig.cameras[1];
+  EXPECT_DOUBLE_EQ(rear.camera.camera.fx, 70.0);
+  EXPECT_EQ(rear.frameOffset, 3);
+  EXPECT_EQ(rear.video, std::filesystem::absolute("/abs/rear.h264"));
+  // Camera z maps to body -x; camera x (image right) to body +y (left of the vehicle, seen from behind).
+  EXPECT_TRUE((rear.T_b_c.so3() * Eigen::Vector3d(0, 0, 1) - Eigen::Vector3d(-1, 0, 0)).norm() < 1e-9);
+  EXPECT_TRUE((rear.T_b_c.so3() * Eigen::Vector3d(1, 0, 0) - Eigen::Vector3d(0, 1, 0)).norm() < 1e-9);
+
+  std::ofstream(dir / "bad.yaml") << "cameras:\n  - camera: front.yaml\n    T_body_camera:\n      translation: [0, 0, 0]\n"
+                                     "      rotation_matrix: [1, 0, 0, 0, 1, 0, 0, 0, 2]\n";
+  EXPECT_THROW(sdv::loadRigConfig(dir / "bad.yaml"), std::runtime_error);
 }
 
 TEST(CameraConfig, ScaleAndCropKeepProjectionsConsistent) {

@@ -1,5 +1,5 @@
-// Direct sparse odometry on a KITTI sequence, a video file or an image folder. Monocular (Sim3 evaluation against
-// ground truth) or, for KITTI, stereo (metric scale).
+// Direct sparse odometry on a KITTI sequence, a video, an image folder or a multi-camera rig (one video per
+// camera). One camera: monocular, Sim3 evaluation against ground truth; KITTI stereo or a rig: metric scale.
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -28,13 +28,16 @@
 #include <sdv/io/frame_source.h>
 #include <sdv/io/kitti.h>
 #include <sdv/io/ply.h>
+#include <sdv/io/rig_config.h>
 #include <sdv/odometry.h>
 #include <sdv/undistort.h>
 
 namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
-  std::string sequenceDir, videoFile, imageDir, cameraFile, gtFile, outFile, plyFile, jsonFile, pngFile, colmapDir;
+  std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, jsonFile, pngFile,
+      colmapDir;
+  std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
   double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, scale = 1.0;
   std::optional<double> camAlpha;
@@ -48,6 +51,8 @@ int main(int argc, char** argv) {
       ("sequence,s", po::value(&sequenceDir), "input: KITTI odometry sequence directory")
       ("video", po::value(&videoFile), "input: video file (needs --camera)")
       ("images", po::value(&imageDir), "input: directory of images in file-name order (needs --camera)")
+      ("rig", po::value(&rigFile), "input: rig YAML with cameras, extrinsics and one video per camera")
+      ("rig-cameras", po::value(&rigCameras)->multitoken(), "use only these rig cameras (names)")
       ("camera", po::value(&cameraFile),
        "camera YAML (width, height, fx, fy, cx, cy, alpha, beta, optional mask); replaces the KITTI calibration")
       ("scale", po::value(&scale)->default_value(1.0), "resize input images (and camera) by this factor")
@@ -75,14 +80,14 @@ int main(int argc, char** argv) {
       ("kf-tflow", po::value(&settings.kfTranslationFlow)->default_value(settings.kfTranslationFlow),
        "keyframe translation flow scale (px)")
       ("stereo-weight", po::value(&settings.window.stereoWeight)->default_value(settings.window.stereoWeight),
-       "weight of static stereo residuals")
+       "weight of static residuals between cameras of one keyframe")
       ("ba-iterations", po::value(&settings.windowIterations)->default_value(settings.windowIterations),
        "window BA iterations per keyframe")
       ("cam-alpha", po::value<double>()->notifier([&](double a) { camAlpha = a; }),
        "override the EUCM alpha of the camera(s); a small negative value corrects residual pincushion distortion "
        "of rectified images (KITTI 00: -0.03)")
       ("check-calibration", po::bool_switch(&checkCalibration),
-       "stereo: log the temporal vs stereo depth bias per image radius at every keyframe")
+       "several cameras: log the temporal vs static depth bias per image radius at every keyframe")
       ("trace", po::bool_switch(&trace), "trace logging (implies verbose)")
       ("verbose,v", po::bool_switch(&verbose), "debug logging");
   try {
@@ -102,72 +107,95 @@ int main(int argc, char** argv) {
   settings.checkCalibration = checkCalibration;
 
   try {
-    if (!sequenceDir.empty() + !videoFile.empty() + !imageDir.empty() != 1)
-      throw std::invalid_argument("give exactly one input: --sequence, --video or --images");
+    if (!sequenceDir.empty() + !videoFile.empty() + !imageDir.empty() + !rigFile.empty() != 1)
+      throw std::invalid_argument("give exactly one input: --sequence, --video, --images or --rig");
     if (stereo && sequenceDir.empty()) throw std::invalid_argument("--stereo needs a KITTI sequence");
 
+    // One entry per rig camera: prepared camera, extrinsic and input stream.
+    struct InputCamera {
+      std::string name;
+      sdv::Camera camera;
+      Sophus::SE3d T_c_b;
+      std::unique_ptr<sdv::SubsampledSource> source;
+    };
+    std::vector<InputCamera> inputs;
+    const int sizeMultiple = 1 << (settings.levels - 1);
+    auto prepare = [&](sdv::CameraConfig config) {
+      if (camAlpha) config.camera.alpha = *camAlpha;
+      return sdv::prepareCamera(config, scale, sizeMultiple);
+    };
     std::optional<sdv::KittiSequence> kitti;
-    std::unique_ptr<sdv::FrameSource> leftInput, rightInput;
-    sdv::CameraConfig config;
-    if (!sequenceDir.empty()) {
-      kitti.emplace(sequenceDir, 1);
-      config.camera = kitti->camera();
-      leftInput = std::make_unique<sdv::KittiSource>(*kitti, 0);
-      if (stereo) rightInput = std::make_unique<sdv::KittiSource>(*kitti, 1);
-    } else if (!videoFile.empty()) {
-      leftInput = std::make_unique<sdv::VideoSource>(videoFile);
+    if (!rigFile.empty()) {
+      const sdv::RigConfig rigConfig = sdv::loadRigConfig(rigFile);
+      for (const auto& c : rigConfig.cameras) {
+        if (!rigCameras.empty() && std::find(rigCameras.begin(), rigCameras.end(), c.name) == rigCameras.end()) continue;
+        if (c.video.empty()) throw std::invalid_argument("rig camera " + c.name + " has no video");
+        inputs.push_back({c.name, prepare(c.camera), c.T_b_c.inverse(),
+                          std::make_unique<sdv::SubsampledSource>(std::make_unique<sdv::VideoSource>(c.video),
+                                                                  start + c.frameOffset, stride)});
+      }
+      if (inputs.empty()) throw std::invalid_argument("no rig camera selected");
     } else {
-      leftInput = std::make_unique<sdv::ImageFolderSource>(imageDir);
+      sdv::CameraConfig config;
+      std::unique_ptr<sdv::FrameSource> source;
+      if (!sequenceDir.empty()) {
+        kitti.emplace(sequenceDir, 1);
+        config.camera = kitti->camera();
+        source = std::make_unique<sdv::KittiSource>(*kitti, 0);
+      } else if (!videoFile.empty()) {
+        source = std::make_unique<sdv::VideoSource>(videoFile);
+      } else {
+        source = std::make_unique<sdv::ImageFolderSource>(imageDir);
+      }
+      if (!cameraFile.empty()) config = sdv::loadCameraConfig(cameraFile);
+      else if (!kitti) throw std::invalid_argument("--video and --images need --camera");
+      const sdv::Camera camera = prepare(config);
+      inputs.push_back({"cam0", camera, Sophus::SE3d(), std::make_unique<sdv::SubsampledSource>(std::move(source), start, stride)});
+      if (stereo) {
+        // KITTI: the body frame is the left camera frame, so poses stay camera-0 poses for the ground truth.
+        inputs.push_back({"cam1", camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)),
+                          std::make_unique<sdv::SubsampledSource>(std::make_unique<sdv::KittiSource>(*kitti, 1), start,
+                                                                  stride)});
+      }
     }
-    if (!cameraFile.empty()) config = sdv::loadCameraConfig(cameraFile);
-    else if (!kitti) throw std::invalid_argument("--video and --images need --camera");
-    if (camAlpha) config.camera.alpha = *camAlpha;
-    const sdv::Camera camera = sdv::prepareCamera(config, scale, 1 << (settings.levels - 1));
-    spdlog::info("camera {}x{} fx {:.2f} fy {:.2f} cx {:.2f} cy {:.2f} alpha {:.4f} beta {:.4f}{}", camera.width,
-                 camera.height, camera.fx, camera.fy, camera.cx, camera.cy, camera.alpha, camera.beta,
-                 camera.mask ? fmt::format(", mask {:.0f} % valid", 100 * camera.mask->validFraction(0)) : "");
-
-    sdv::SubsampledSource left(std::move(leftInput), start, stride);
-    std::optional<sdv::SubsampledSource> right;
-    if (rightInput) right.emplace(std::move(rightInput), start, stride);
+    sdv::Rig rig;
+    for (const auto& in : inputs) {
+      const sdv::Camera& c = in.camera;
+      spdlog::info("camera {}: {}x{} fx {:.2f} fy {:.2f} cx {:.2f} cy {:.2f} alpha {:.4f} beta {:.4f}{}", in.name,
+                   c.width, c.height, c.fx, c.fy, c.cx, c.cy, c.alpha, c.beta,
+                   c.mask ? fmt::format(", mask {:.0f} % valid", 100 * c.mask->validFraction(0)) : "");
+      rig.cameras.push_back(c);
+      rig.T_c_b.push_back(in.T_c_b);
+    }
+    const bool multiCamera = rig.size() > 1;
     auto frameIndex = [&](size_t i) { return start + i * stride; };
-
-    sdv::Rig rig = sdv::Rig::mono(camera);
-    if (stereo) {
-      // KITTI: the body frame is the left camera frame, so poses stay camera-0 poses for the ground truth.
-      rig.cameras.push_back(camera);
-      rig.T_c_b.push_back(Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)));
-    }
     sdv::Odometry vo(rig, settings);
 
     using Clock = std::chrono::steady_clock;
     double totalMs = 0, maxMs = 0, waitMs = 0;
     int keyframes = 0, weak = 0;
     size_t n = 0;
-    struct InputFrame {
-      cv::Mat image, right;
-    };
-    // Decoding and resizing the next frame overlaps with processing the current one.
+    // Decoding and resizing the next frame overlaps with processing the current one. Empty at the end of any stream.
     auto readFrame = [&] {
-      InputFrame f;
-      const cv::Mat input = left.next();
-      if (input.empty()) return f;
-      f.image = sdv::prepareImage(input, scale, camera);
-      if (right) f.right = sdv::prepareImage(right->next(), scale, camera);
-      return f;
+      std::vector<cv::Mat> images;
+      for (const auto& in : inputs) {
+        const cv::Mat input = in.source->next();
+        if (input.empty()) return std::vector<cv::Mat>{};
+        images.push_back(sdv::prepareImage(input, scale, in.camera));
+      }
+      return images;
     };
     const auto tStart = Clock::now();
     {
-      std::future<InputFrame> pending = std::async(std::launch::async, readFrame);
+      std::future<std::vector<cv::Mat>> pending = std::async(std::launch::async, readFrame);
       for (; maxFrames == 0 || n < maxFrames; ++n) {
         const auto tIn = Clock::now();
-        const InputFrame frame = pending.get();
-        if (frame.image.empty()) break;
+        const std::vector<cv::Mat> frame = pending.get();
+        if (frame.empty()) break;
         if (maxFrames == 0 || n + 1 < maxFrames) pending = std::async(std::launch::async, readFrame);
         const auto t0 = Clock::now();
         waitMs += std::chrono::duration<double, std::milli>(t0 - tIn).count();
-        const sdv::OdometryFrameInfo info =
-            vo.addFrame(frame.right.empty() ? std::vector{frame.image} : std::vector{frame.image, frame.right});
+        const sdv::OdometryFrameInfo info = vo.addFrame(frame);
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
         totalMs += ms;
         maxMs = std::max(maxMs, ms);
@@ -201,8 +229,8 @@ int main(int argc, char** argv) {
     if (!outFile.empty()) sdv::saveKittiPoses(outFile, est);
 
     sdv::SimilarityTransform alignment;
-    std::string metrics = fmt::format(R"("stereo":{},"frames":{},"start":{},"stride":{},"keyframes":{},"msPerFrame":{:.1f})",
-                                      stereo, n, start, stride, keyframes, totalMs / n);
+    std::string metrics = fmt::format(R"("cameras":{},"frames":{},"start":{},"stride":{},"keyframes":{},"msPerFrame":{:.1f})",
+                                      rig.size(), n, start, stride, keyframes, totalMs / n);
     if (!gt.empty() && est.size() > 2) {
       const auto ate = sdv::absoluteTrajectoryError(gt, est, true);
       alignment = ate.alignment;
@@ -219,12 +247,12 @@ int main(int argc, char** argv) {
         localScale += fmt::format(" {:.2f}", g / e / alignment.scale);
         localScaleJson += fmt::format("{}{:.3f}", localScaleJson.empty() ? "" : ",", g / e / alignment.scale);
       }
-      if (stereo) {
+      if (multiCamera) {
         const auto metric = sdv::absoluteTrajectoryError(gt, est, false);
         std::vector<Sophus::SE3d> metricAligned = est;
         for (auto& p : metricAligned) p = metric.alignment.applyToPose(p);
         const auto metricSeg = sdv::segmentDriftError(gt, metricAligned);
-        spdlog::info("stereo, metric: ATE SE3 rmse {:.3f} m, max {:.3f} m | drift t {:.2f} % r {:.3f} deg/100m",
+        spdlog::info("metric: ATE SE3 rmse {:.3f} m, max {:.3f} m | drift t {:.2f} % r {:.3f} deg/100m",
                      metric.rmse, metric.max, metricSeg.translationPercent, metricSeg.rotationDegPer100m);
       }
       metrics += fmt::format(R"(,"scale":{:.4f},"ateRmse":{:.3f},"ateMax":{:.3f},"length":{:.1f},"driftT":{:.2f},)"
@@ -336,47 +364,70 @@ int main(int argc, char** argv) {
 
     if (!colmapDir.empty()) {
       const std::filesystem::path root(colmapDir);
-      const sdv::Camera& cam = camera;
-      const sdv::Camera exportCam = cam.isPinhole() ? cam : sdv::virtualPinhole(cam, focalScale);
-      const auto undistortMap = cam.isPinhole() ? sdv::UndistortMap{} : sdv::makeUndistortMap(cam, exportCam);
-      std::filesystem::create_directories(root / "images");
       const sdv::SimilarityTransform exportAlignment = colmapAlign ? alignment : sdv::SimilarityTransform{};
-
-      // Valid area of the exported images, for trainers that take masks.
-      cv::Mat exportMask;
-      if (cam.mask) {
-        exportMask = cv::Mat(exportCam.height, exportCam.width, CV_8UC1, cv::Scalar(255));
-        if (!cam.isPinhole()) exportMask.setTo(0, undistortMap.mapX < 0);
-        else exportMask = cam.mask->level(0).clone();
-        std::filesystem::create_directories(root / "masks");
+      // Per camera: pinhole export camera, undistortion, valid area (for trainers that take masks) and image folder.
+      struct ExportCamera {
+        sdv::Camera camera;
+        sdv::UndistortMap undistortMap;
+        cv::Mat mask;
+        std::string prefix;
+      };
+      std::vector<ExportCamera> exportCams;
+      std::vector<sdv::Camera> colmapCams;
+      for (const auto& in : inputs) {
+        const sdv::Camera& cam = in.camera;
+        ExportCamera e;
+        e.camera = cam.isPinhole() ? cam : sdv::virtualPinhole(cam, focalScale);
+        if (!cam.isPinhole()) e.undistortMap = sdv::makeUndistortMap(cam, e.camera);
+        e.prefix = multiCamera ? in.name + "/" : "";
+        std::filesystem::create_directories(root / "images" / e.prefix);
+        if (cam.mask) {
+          e.mask = cam.isPinhole() ? cam.mask->level(0).clone()
+                                   : cv::Mat(e.camera.height, e.camera.width, CV_8UC1, cv::Scalar(255));
+          if (!cam.isPinhole()) e.mask.setTo(0, e.undistortMap.mapX < 0);
+          std::filesystem::create_directories(root / "masks" / e.prefix);
+        }
+        colmapCams.push_back(e.camera);
+        exportCams.push_back(std::move(e));
       }
 
       const auto keyframeIndices = vo.keyframeIndices();
       std::vector<sdv::ColmapImage> images;
-      std::map<int, size_t> imageOfFrame;
-      // Point colours from the host keyframe's input image (before undistortion, at the tracked pixel).
-      std::map<int, cv::Mat> hostImages;
-      for (const auto& m : mapPoints) hostImages[m.frameIndex];
-      left.rewind();
+      std::map<std::pair<int, int>, size_t> imageOf;  // (frame, camera)
+      // Point colours from the host camera's input image (before undistortion, at the tracked pixel).
+      std::map<std::pair<int, int>, cv::Mat> hostImages;
+      for (const auto& m : mapPoints) hostImages[{m.frameIndex, m.camera}];
+      for (auto& in : inputs) in.source->rewind();
       for (size_t i = 0; i < poses.size(); ++i) {
-        const cv::Mat input = left.next();
-        if (input.empty()) break;
-        const bool host = hostImages.contains(static_cast<int>(i));
+        const int frame = static_cast<int>(i);
         const bool exported =
-            poses[i] && (!colmapKeyframesOnly || std::find(keyframeIndices.begin(), keyframeIndices.end(),
-                                                           static_cast<int>(i)) != keyframeIndices.end());
-        if (!host && !exported) continue;
-        cv::Mat img = sdv::prepareImage(input, scale, camera);
-        // GS trainers expect 3-channel images.
-        if (img.channels() == 1) cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
-        if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
-        if (host) hostImages[static_cast<int>(i)] = img;
-        if (!exported) continue;
-        const std::string name = fmt::format("{:06d}.png", frameIndex(i));
-        cv::imwrite((root / "images" / name).string(), cam.isPinhole() ? img : sdv::undistort(img, undistortMap));
-        if (!exportMask.empty()) cv::imwrite((root / "masks" / name).string(), exportMask);
-        imageOfFrame[static_cast<int>(i)] = images.size();
-        images.push_back({static_cast<int>(images.size()) + 1, name, exportAlignment.applyToPose(*poses[i]).inverse(), {}});
+            poses[i] && (!colmapKeyframesOnly ||
+                         std::find(keyframeIndices.begin(), keyframeIndices.end(), frame) != keyframeIndices.end());
+        bool ended = false;
+        for (int c = 0; c < rig.size(); ++c) {
+          const cv::Mat input = inputs[c].source->next();
+          if (input.empty()) {
+            ended = true;
+            break;
+          }
+          const bool host = hostImages.contains({frame, c});
+          if (!host && !exported) continue;
+          cv::Mat img = sdv::prepareImage(input, scale, inputs[c].camera);
+          // GS trainers expect 3-channel images.
+          if (img.channels() == 1) cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
+          if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
+          if (host) hostImages[{frame, c}] = img;
+          if (!exported) continue;
+          const ExportCamera& e = exportCams[c];
+          const std::string name = e.prefix + fmt::format("{:06d}.png", frameIndex(i));
+          cv::imwrite((root / "images" / name).string(),
+                      inputs[c].camera.isPinhole() ? img : sdv::undistort(img, e.undistortMap));
+          if (!e.mask.empty()) cv::imwrite((root / "masks" / name).string(), e.mask);
+          imageOf[{frame, c}] = images.size();
+          const Sophus::SE3d T_c_w = rig.T_c_b[c] * exportAlignment.applyToPose(*poses[i]).inverse();
+          images.push_back({static_cast<int>(images.size()) + 1, name, T_c_w, {}, c + 1});
+        }
+        if (ended) break;
       }
 
       std::vector<sdv::ColmapPoint> points;
@@ -384,13 +435,14 @@ int main(int argc, char** argv) {
         const Eigen::Vector3d X = exportAlignment.apply(m.position);
         std::array<std::uint8_t, 3> rgb;
         rgb.fill(static_cast<std::uint8_t>(std::clamp(m.intensity, 0.f, 255.f)));
-        if (const cv::Mat& h = hostImages[m.frameIndex]; !h.empty()) {
+        if (const cv::Mat& h = hostImages[{m.frameIndex, m.camera}]; !h.empty()) {
           const cv::Vec3b bgr = h.at<cv::Vec3b>(static_cast<int>(std::lround(m.uv.y())), static_cast<int>(std::lround(m.uv.x())));
           rgb = {bgr[2], bgr[1], bgr[0]};
         }
         sdv::ColmapPoint p{static_cast<std::int64_t>(points.size()) + 1, X, rgb};
-        if (const auto it = imageOfFrame.find(m.frameIndex); it != imageOfFrame.end()) {
+        if (const auto it = imageOf.find({m.frameIndex, m.camera}); it != imageOf.end()) {
           sdv::ColmapImage& img = images[it->second];
+          const sdv::Camera& exportCam = exportCams[m.camera].camera;
           Eigen::Vector2d uv;
           if (exportCam.project(img.T_c_w * X, uv) && exportCam.isInside(uv.x(), uv.y(), 0.0)) {
             p.track.emplace_back(img.id, static_cast<int>(img.points2D.size()));
@@ -399,27 +451,29 @@ int main(int argc, char** argv) {
         }
         points.push_back(std::move(p));
       }
-      sdv::writeColmapText(root / "sparse" / "0", exportCam, images, points);
+      sdv::writeColmapText(root / "sparse" / "0", colmapCams, images, points);
       spdlog::info("wrote COLMAP model to {}: {} images, {} points", root.string(), images.size(), points.size());
     }
 
     if (!pngFile.empty()) {
-      // Top-down view (KITTI camera frame: x right, z forward).
+      // Top-down view: camera frames (KITTI, single camera) x right, z forward; vehicle rigs x forward, y left.
+      auto ground = [&](const Eigen::Vector3d& p) { return rigFile.empty() ? Eigen::Vector2d(p.x(), p.z()) : Eigen::Vector2d(p.x(), p.y()); };
       const int size = 1200;
       std::vector<Eigen::Vector3d> all;
       for (const auto& p : gt.empty() ? est : gt) all.push_back(p.translation());
       Eigen::Vector2d lo(1e9, 1e9), hi(-1e9, -1e9);
       for (const auto& p : all) {
-        lo = lo.cwiseMin(Eigen::Vector2d(p.x(), p.z()));
-        hi = hi.cwiseMax(Eigen::Vector2d(p.x(), p.z()));
+        lo = lo.cwiseMin(ground(p));
+        hi = hi.cwiseMax(ground(p));
       }
       const double margin = 0.05 * std::max(hi.x() - lo.x(), hi.y() - lo.y()) + 1e-6;
       lo.array() -= margin;
       hi.array() += margin;
       const double pxPerUnit = size / std::max(hi.x() - lo.x(), hi.y() - lo.y());
       auto px = [&](const Eigen::Vector3d& p) {
-        return cv::Point(static_cast<int>((p.x() - lo.x()) * pxPerUnit),
-                         size - static_cast<int>((p.z() - lo.y()) * pxPerUnit));
+        const Eigen::Vector2d g = ground(p);
+        return cv::Point(static_cast<int>((g.x() - lo.x()) * pxPerUnit),
+                         size - static_cast<int>((g.y() - lo.y()) * pxPerUnit));
       };
       cv::Mat img(size, size, CV_8UC3, cv::Scalar(29, 21, 17));
       for (const auto& m : mapPoints) {

@@ -103,11 +103,12 @@ inline double trueRho(const Sophus::SE3d& T_c_w, const Eigen::Vector3d& bearing)
   return 1.0 / castRay(T_w_c.translation(), T_w_c.so3() * bearing);
 }
 
-// OpenCV camera looking along body +x (front) or -x (rear), mounted at `position` in the body frame.
-inline Sophus::SE3d cameraFromBody(bool front, const Eigen::Vector3d& position) {
+// T_c_b of a level OpenCV camera looking along body direction `yaw` (0 forward, pi/2 left), mounted at `position`.
+inline Sophus::SE3d cameraFromBody(double yaw, const Eigen::Vector3d& position) {
   Eigen::Matrix3d R_b_c;
-  if (front) R_b_c << 0, 0, 1, -1, 0, 0, 0, -1, 0;
-  else R_b_c << 0, 0, -1, 1, 0, 0, 0, -1, 0;
+  R_b_c.col(0) = Eigen::Vector3d(std::sin(yaw), -std::cos(yaw), 0);
+  R_b_c.col(1) = Eigen::Vector3d(0, 0, -1);
+  R_b_c.col(2) = Eigen::Vector3d(std::cos(yaw), std::sin(yaw), 0);
   return Sophus::SE3d(R_b_c, position).inverse();
 }
 

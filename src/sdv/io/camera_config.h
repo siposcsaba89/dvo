@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include <opencv2/core.hpp>
+#include <yaml-cpp/node/node.h>
 
 #include <sdv/camera.h>
 
@@ -17,6 +18,8 @@ struct CameraConfig {
 };
 
 CameraConfig loadCameraConfig(const std::filesystem::path& file);
+// Same keys from a YAML node; `file` names the source for errors and anchors a relative mask path.
+CameraConfig parseCameraConfig(const YAML::Node& node, const std::filesystem::path& file);
 
 // Input images are resized by `scale` and then cropped at the right and bottom to a multiple of `sizeMultiple`
 // (the pyramid needs it; cropping there keeps the principal point). Returns the matching camera with its

@@ -376,8 +376,8 @@ INSTANTIATE_TEST_SUITE_P(Cameras, WindowOptimizerTest,
 TEST(WindowOptimizerRig, NonOverlappingRigRecoversScaleInTurn) {
   const sdv::Camera cam = sdv::Camera::pinhole(250, 250, 159.5, 119.5, kW, kH);
   const sdv::Rig rig{{cam, cam},
-                     {synthetic::room::cameraFromBody(true, {1.5, 0.0, 0.3}),
-                      synthetic::room::cameraFromBody(false, {-1.0, 0.0, 0.3})}};
+                     {synthetic::room::cameraFromBody(0.0, {1.5, 0.0, 0.3}),
+                      synthetic::room::cameraFromBody(M_PI, {-1.0, 0.0, 0.3})}};
   sdv::WindowOptimizer opt(rig);
   constexpr double wrongScale = 1.2;
   std::map<int, double> truth;

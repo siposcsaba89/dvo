@@ -19,6 +19,7 @@ struct ColmapImage {
   std::string name;
   Sophus::SE3d T_c_w;
   std::vector<std::pair<Eigen::Vector2d, std::int64_t>> points2D;  // pixel, point3D id (-1 = none)
+  int cameraId = 1;  // 1-based index into the camera list
 };
 
 struct ColmapPoint {
@@ -29,8 +30,12 @@ struct ColmapPoint {
   std::vector<std::pair<int, int>> track;  // image id, index into that image's points2D
 };
 
-// Writes cameras.txt, images.txt and points3D.txt (COLMAP text model) for a single PINHOLE camera with id 1.
-void writeColmapText(const std::filesystem::path& dir, const Camera& cam, const std::vector<ColmapImage>& images,
-                     const std::vector<ColmapPoint>& points);
+// Writes cameras.txt, images.txt and points3D.txt (COLMAP text model); PINHOLE cameras with ids 1, 2, ...
+void writeColmapText(const std::filesystem::path& dir, const std::vector<Camera>& cams,
+                     const std::vector<ColmapImage>& images, const std::vector<ColmapPoint>& points);
+inline void writeColmapText(const std::filesystem::path& dir, const Camera& cam, const std::vector<ColmapImage>& images,
+                            const std::vector<ColmapPoint>& points) {
+  writeColmapText(dir, std::vector<Camera>{cam}, images, points);
+}
 
 }  // namespace sdv

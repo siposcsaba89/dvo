@@ -35,6 +35,10 @@ CameraConfig loadCameraConfig(const std::filesystem::path& file) {
   } catch (const YAML::Exception& e) {
     throw std::runtime_error("cannot read camera config " + file.string() + ": " + e.what());
   }
+  return parseCameraConfig(node, file);
+}
+
+CameraConfig parseCameraConfig(const YAML::Node& node, const std::filesystem::path& file) {
   CameraConfig config;
   Camera& c = config.camera;
   c.width = required<int>(node, "width", file);

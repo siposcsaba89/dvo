@@ -119,8 +119,10 @@ void Odometry::initializeFromMono(const MonoInitResult& res, const Pyramids& cur
   selectCandidates(host);
   m_initialized = true;
 
-  traceCandidates(current, res.T_t_h, {res.affine});
-  const int id = createKeyframe(current, res.T_t_h, {res.affine});
+  // The initialiser estimates the camera motion; the world frame is the body frame of the first keyframe.
+  const Sophus::SE3d T_b_w = m_rig.T_c_b[0].inverse() * res.T_t_h * m_rig.T_c_b[0];
+  traceCandidates(current, T_b_w, {res.affine});
+  const int id = createKeyframe(current, T_b_w, {res.affine});
   m_frames.back() = {id, Sophus::SE3d()};
 }
 
