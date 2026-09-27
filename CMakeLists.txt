@@ -21,6 +21,7 @@ find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
 find_package(tinyply CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(fbow CONFIG REQUIRED)
+find_package(Ceres CONFIG REQUIRED)
 
 add_library(sdv STATIC
   src/sdv/camera.h
@@ -30,6 +31,8 @@ add_library(sdv STATIC
   src/sdv/immature_point.cpp
   src/sdv/keyframe_features.h
   src/sdv/keyframe_features.cpp
+  src/sdv/loop_detector.h
+  src/sdv/loop_detector.cpp
   src/sdv/mono_initializer.h
   src/sdv/mono_initializer.cpp
   src/sdv/map_point.h
@@ -74,7 +77,7 @@ add_library(sdv STATIC
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
   opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio opencv_features2d yaml-cpp::yaml-cpp
-  PRIVATE fbow::fbow)
+  PRIVATE fbow::fbow Ceres::ceres)
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
@@ -115,6 +118,9 @@ target_link_libraries(train_vocabulary PRIVATE sdv Boost::program_options)
 add_executable(place_recall apps/place_recall.cpp)
 target_link_libraries(place_recall PRIVATE sdv Boost::program_options)
 
+add_executable(detect_loops apps/detect_loops.cpp)
+target_link_libraries(detect_loops PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
@@ -123,6 +129,7 @@ add_executable(sdv_tests
   tests/test_camera_config.cpp
   tests/test_immature_point.cpp
   tests/test_keyframe_features.cpp
+  tests/test_loop_detector.cpp
   tests/test_place_database.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp

@@ -195,3 +195,26 @@ Vocabulary k=10, 5 levels, trained on 3000 images of both sequences. Garage revi
 (69 -> 80 %); it should be trained on other aiMotive recordings than the test one. Score thresholds alone are not
 precise enough (garage: 6 wrong of 28 at 1.0), so step 15 verifies geometrically. KITTI 00 full-sequence baseline
 before loop closure: ATE SE3 3.95 m.
+
+## Step 15 log
+
+`detect_loops` runs `LoopDetector` over keyframe records in input order (incremental interface):
+1. Candidates: best BoW matches of every camera against all cameras of keyframes 150+ frames older, score normalised
+   by the score against the previous keyframe (>= 0.3), top 3.
+2. Verification: ORB matches (ratio 0.8, one query feature per match feature), RANSAC over matches with depth on both
+   sides (3-point absolute orientation, Horn 1987 / Umeyama 1991; metric rig, so SE3), scored by the angular
+   reprojection error of all matches with depth on at least one side (3 px), Ceres refinement (Huber), >= 40 inliers.
+3. Odometry consistency: the corrected query pose may differ from the odometry by at most 1 m + 3 % of the path
+   between the keyframes horizontally, 0.5 m + 1 % vertically (floors of a multi-storey garage) and 5 deg + 0.02 deg/m.
+4. Temporal consistency: 2+ loops of query keyframes within +-5 must imply the same correction (1 m, 3 deg).
+
+| Data | Geometric loops | Accepted | Revisit keyframes covered | Checked against GT |
+|------|-----------------|----------|---------------------------|--------------------|
+| KITTI 00 stereo | 1302 | 1302 | 449 / 479 (94 %) | all within 1.53 m / 2.1 deg; rotation median 0.23 deg |
+| Garage, F/L/B, both laps | 89 | 89 | - | lap 2 (1150-1766) -> lap 1 (672-0) in order, reversing 921-958 -> 751-769 |
+
+KITTI: the estimated vertical offset of revisits is ~0 (same road), while the GPS/INS ground truth differs by
+0.4-1 m in height between visits; horizontal difference median 0.45 m. Garage: implied corrections grow smoothly
+along lap 2 from 0.02 m / 0.3 deg to 0.75 m / 1.6 deg, no outlier. Stress test (12 inliers, score 0.1, 5 candidates):
+KITTI one bad loop (3.2 m, 18 inliers), removed by the temporal check; garage 10 candidates rejected by the odometry
+check. Not yet tested: multi-storey data (needs a recording).
