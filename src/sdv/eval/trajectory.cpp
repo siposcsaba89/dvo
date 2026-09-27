@@ -107,4 +107,26 @@ SegmentErrorResult segmentDriftError(const std::vector<Sophus::SE3d>& gt,
   return r;
 }
 
+
+RelativePoseErrorResult relativePoseError(const std::vector<Sophus::SE3d>& gt, const std::vector<Sophus::SE3d>& est,
+                                          size_t delta, double scale) {
+  RelativePoseErrorResult r;
+  const size_t n = std::min(gt.size(), est.size());
+  double sumT = 0, sumR = 0;
+  for (size_t i = 0; i + delta < n; ++i) {
+    Sophus::SE3d relEst = est[i].inverse() * est[i + delta];
+    relEst.translation() *= scale;
+    const Sophus::SE3d err = (gt[i].inverse() * gt[i + delta]).inverse() * relEst;
+    sumT += err.translation().squaredNorm();
+    const double deg = err.so3().logAndTheta().theta * 180.0 / M_PI;
+    sumR += deg * deg;
+    ++r.numPairs;
+  }
+  if (r.numPairs > 0) {
+    r.translationRmse = std::sqrt(sumT / r.numPairs);
+    r.rotationRmseDeg = std::sqrt(sumR / r.numPairs);
+  }
+  return r;
+}
+
 }  // namespace sdv

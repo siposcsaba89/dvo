@@ -39,4 +39,16 @@ struct SegmentErrorResult {
 SegmentErrorResult segmentDriftError(const std::vector<Sophus::SE3d>& gt,
                                      const std::vector<Sophus::SE3d>& est);
 
+
+struct RelativePoseErrorResult {
+  double translationRmse = 0;  // gt units
+  double rotationRmseDeg = 0;
+  int numPairs = 0;
+};
+
+// Relative pose error between poses `delta` apart (Sturm et al., IROS 2012); `est` translations are multiplied by
+// `scale` first (Sim3 scale of a monocular estimate).
+RelativePoseErrorResult relativePoseError(const std::vector<Sophus::SE3d>& gt, const std::vector<Sophus::SE3d>& est,
+                                          size_t delta = 1, double scale = 1.0);
+
 }  // namespace sdv

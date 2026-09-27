@@ -1,6 +1,7 @@
 // Direct sparse odometry on a KITTI sequence, a video file or an image folder. Monocular (Sim3 evaluation against
 // ground truth) or, for KITTI, stereo (metric scale).
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <algorithm>
@@ -203,6 +204,11 @@ int main(int argc, char** argv) {
                              seg.rotationDegPer100m,
                              localScaleJson);
       spdlog::info("local scale per 50 frames relative to global:{}", localScale);
+      // Frame-to-frame jitter; only consecutive input frames that both have a pose count.
+      const auto rpe = sdv::relativePoseError(gt, est, 1, alignment.scale);
+      spdlog::info("RPE 1 frame: rmse {:.2f} cm, {:.4f} deg ({} pairs)", 100 * rpe.translationRmse, rpe.rotationRmseDeg,
+                   rpe.numPairs);
+      metrics += fmt::format(R"(,"rpeT":{:.4f},"rpeR":{:.5f})", rpe.translationRmse, rpe.rotationRmseDeg);
       spdlog::info("ATE Sim3 rmse {:.3f} m, max {:.3f} m, scale {:.3f} over {:.0f} m | drift t {:.2f} % "
                    "r {:.3f} deg/100m ({} segments)",
                    ate.rmse, ate.max, alignment.scale, length, seg.translationPercent, seg.rotationDegPer100m,
@@ -242,11 +248,20 @@ int main(int argc, char** argv) {
 
     if (!jsonFile.empty()) {
       std::ofstream out(jsonFile);
+      // Enough decimals for ~0.1 % of the typical point distance (monocular units are arbitrary).
+      double typical = 1.0;
+      if (!mapPoints.empty()) {
+        std::vector<double> dist;
+        for (const auto& p : mapPoints) dist.push_back(p.distance * alignment.scale);
+        std::nth_element(dist.begin(), dist.begin() + dist.size() / 2, dist.end());
+        typical = std::max(dist[dist.size() / 2], 1e-9);
+      }
+      const int decimals = std::clamp(3 - static_cast<int>(std::floor(std::log10(typical))), 2, 8);
       auto writePath = [&](const char* name, const std::vector<Sophus::SE3d>& path, bool align) {
         out << '"' << name << "\":[";
         for (size_t i = 0; i < path.size(); ++i) {
           const Eigen::Vector3d p = align ? alignment.apply(path[i].translation()) : path[i].translation();
-          out << (i ? "," : "") << fmt::format("{:.2f},{:.2f},{:.2f}", p.x(), p.y(), p.z());
+          out << (i ? "," : "") << fmt::format("{:.{}f},{:.{}f},{:.{}f}", p.x(), decimals, p.y(), decimals, p.z(), decimals);
         }
         out << "],";
       };
@@ -261,7 +276,7 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < mapPoints.size(); ++i) {
         const Eigen::Vector3d p = alignment.apply(mapPoints[i].position);
         out << (i ? "," : "")
-            << fmt::format("{:.2f},{:.2f},{:.2f},{}", p.x(), p.y(), p.z(),
+            << fmt::format("{:.{}f},{:.{}f},{:.{}f},{}", p.x(), decimals, p.y(), decimals, p.z(), decimals,
                            static_cast<int>(std::clamp(mapPoints[i].intensity, 0.f, 255.f)));
       }
       out << "]}";

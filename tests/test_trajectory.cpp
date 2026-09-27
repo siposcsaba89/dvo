@@ -56,3 +56,20 @@ TEST(Trajectory, DriftDetectsScaleError) {
   ASSERT_GT(seg.numSegments, 0);
   EXPECT_NEAR(seg.translationPercent, 1.0, 0.05);
 }
+
+TEST(Trajectory, RelativePoseErrorMeasuresJitter) {
+  const auto gt = makeTrajectory(200);
+  EXPECT_NEAR(sdv::relativePoseError(gt, gt).rotationRmseDeg, 0.0, 1e-9);
+  std::vector<Sophus::SE3d> est = gt;
+  // Every other pose rotated by 0.1 deg: each consecutive pair is off by 0.1 deg.
+  for (size_t i = 1; i < est.size(); i += 2)
+    est[i] = est[i] * Sophus::SE3d(Sophus::SO3d::exp(Eigen::Vector3d(0, 0.1 * M_PI / 180.0, 0)), Eigen::Vector3d::Zero());
+  const auto rpe = sdv::relativePoseError(gt, est);
+  EXPECT_EQ(rpe.numPairs, 199);
+  EXPECT_NEAR(rpe.rotationRmseDeg, 0.1, 1e-6);
+  // A pure scale difference vanishes with the right scale.
+  std::vector<Sophus::SE3d> scaled;
+  for (const auto& p : gt) scaled.emplace_back(p.so3(), p.translation() * 0.5);
+  EXPECT_NEAR(sdv::relativePoseError(gt, scaled, 1, 2.0).translationRmse, 0.0, 1e-9);
+  EXPECT_GT(sdv::relativePoseError(gt, scaled).translationRmse, 0.1);
+}

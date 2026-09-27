@@ -80,6 +80,9 @@ target_link_libraries(mono_init PRIVATE sdv Boost::program_options)
 add_executable(window_stereo apps/window_stereo.cpp)
 target_link_libraries(window_stereo PRIVATE sdv Boost::program_options)
 
+add_executable(video_frames apps/video_frames.cpp)
+target_link_libraries(video_frames PRIVATE sdv Boost::program_options)
+
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
 
