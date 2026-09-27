@@ -32,7 +32,7 @@ class PointSelector {
   std::vector<Candidate> select(const ImageLevel& img, const cv::Mat& mask = {}) const;
 
  private:
-  std::vector<float> regionThresholds(const ImageLevel& img, int& regionsX, int& regionsY) const;
+  std::vector<float> regionThresholds(const ImageLevel& img, const cv::Mat& mask, int& regionsX, int& regionsY) const;
   std::vector<Candidate> selectWithCellSize(const ImageLevel& img, const cv::Mat& mask, int cell,
                                             const std::vector<float>& thresholds, int regionsX) const;
 

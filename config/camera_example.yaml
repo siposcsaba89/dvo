@@ -1,0 +1,14 @@
+# Camera for run_vo --camera. EUCM model (Khomutenko et al., RA-L 2016); a pinhole camera is alpha 0, beta 1.
+# Intrinsics are for the full-resolution input images; --scale resizes both consistently.
+# Pixel convention: integer coordinates are pixel centres (OpenCV / Kalibr / Basalt).
+width: 1920
+height: 1080
+fx: 600.0
+fy: 600.0
+cx: 959.5
+cy: 539.5
+alpha: 0.6
+beta: 1.0
+# Optional validity mask, relative to this file: 1-channel image of the input size, > 128 = valid, e.g. 0 outside
+# the fisheye image circle and on the ego vehicle, 255 elsewhere.
+mask: mask.png

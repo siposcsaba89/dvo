@@ -14,11 +14,12 @@ endif()
 
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(Sophus CONFIG REQUIRED)
-find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d)
+find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d videoio)
 find_package(GTest CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
 find_package(tinyply CONFIG REQUIRED)
+find_package(yaml-cpp CONFIG REQUIRED)
 
 add_library(sdv STATIC
   src/sdv/camera.h
@@ -40,11 +41,17 @@ add_library(sdv STATIC
   src/sdv/tracker.cpp
   src/sdv/undistort.h
   src/sdv/undistort.cpp
+  src/sdv/validity_mask.h
+  src/sdv/validity_mask.cpp
   src/sdv/window_optimizer.h
   src/sdv/window_optimizer.cpp
   src/sdv/io/kitti.h
   src/sdv/io/colmap.h
   src/sdv/io/colmap.cpp
+  src/sdv/io/camera_config.h
+  src/sdv/io/camera_config.cpp
+  src/sdv/io/frame_source.h
+  src/sdv/io/frame_source.cpp
   src/sdv/io/kitti.cpp
   src/sdv/io/ply.h
   src/sdv/io/ply.cpp
@@ -53,7 +60,7 @@ add_library(sdv STATIC
 )
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
-  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d)
+  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio yaml-cpp::yaml-cpp)
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
@@ -81,6 +88,7 @@ add_executable(sdv_tests
   tests/synthetic_scene.h
   tests/test_camera.cpp
   tests/test_colmap.cpp
+  tests/test_camera_config.cpp
   tests/test_immature_point.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp

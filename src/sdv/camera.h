@@ -1,8 +1,12 @@
 #pragma once
 
 #include <cmath>
+#include <memory>
 
 #include <Eigen/Core>
+#include <opencv2/core.hpp>
+
+#include <sdv/validity_mask.h>
 
 namespace sdv {
 
@@ -15,6 +19,9 @@ class Camera {
   double fx = 0, fy = 0, cx = 0, cy = 0;
   double alpha = 0, beta = 1;
   int width = 0, height = 0;
+  // Optional valid image area, shared by all pyramid levels of this camera.
+  std::shared_ptr<const ValidityMask> mask;
+  int maskLevel = 0;
 
   static Camera pinhole(double fx, double fy, double cx, double cy, int w, int h) {
     return Camera{fx, fy, cx, cy, 0.0, 1.0, w, h};
@@ -36,6 +43,7 @@ class Camera {
       c.cy = (c.cy + 0.5) * 0.5 - 0.5;
       c.width /= 2;
       c.height /= 2;
+      ++c.maskLevel;
     }
     return c;
   }
@@ -90,8 +98,17 @@ class Camera {
   }
 
   bool isInside(double u, double v, double border) const {
-    return u >= border && v >= border && u < width - 1 - border && v < height - 1 - border;
+    if (!(u >= border && v >= border && u < width - 1 - border && v < height - 1 - border)) return false;
+    if (!mask) return true;
+    // Corners of the pixel block a pattern of this border reads (bilinear taps included).
+    const int u0 = static_cast<int>(u - border), v0 = static_cast<int>(v - border);
+    const int u1 = static_cast<int>(u + border) + 1, v1 = static_cast<int>(v + border) + 1;
+    return mask->valid(maskLevel, u0, v0) && mask->valid(maskLevel, u1, v0) && mask->valid(maskLevel, u0, v1) &&
+           mask->valid(maskLevel, u1, v1);
   }
+
+  // CV_8UC1 255 = valid at this camera's level, or empty without a mask.
+  cv::Mat maskImage() const { return mask ? mask->level(maskLevel) : cv::Mat(); }
 
  private:
   double validityW() const {

@@ -29,7 +29,7 @@ void MonoInitializer::reset(const ImagePyramid& first, const cv::Mat& rhoPrior) 
     PointSelectorSettings sel;
     sel.targetPoints =
         std::max(20, static_cast<int>(m_settings.pointsLevel0 * std::pow(m_settings.levelPointFactor, l)));
-    for (const auto& c : PointSelector(sel).select(first.level(l))) {
+    for (const auto& c : PointSelector(sel).select(first.level(l), level.cam.maskImage())) {
       const Eigen::Vector2d uv = c.uv.cast<double>();
       auto pattern = makePatternPoint(level.cam, first.level(l), uv, m_settings.photometric);
       Point p;

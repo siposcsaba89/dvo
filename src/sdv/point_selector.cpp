@@ -6,12 +6,15 @@
 
 namespace sdv {
 
-std::vector<float> PointSelector::regionThresholds(const ImageLevel& img, int& regionsX, int& regionsY) const {
+std::vector<float> PointSelector::regionThresholds(const ImageLevel& img, const cv::Mat& mask, int& regionsX,
+                                                  int& regionsY) const {
   const int R = m_settings.regionSize;
   regionsX = (img.width + R - 1) / R;
   regionsY = (img.height + R - 1) / R;
   constexpr int kBins = 50;
 
+  // Regions without enough valid pixels get no median and are skipped when smoothing.
+  constexpr float kNoMedian = -1.f;
   std::vector<float> medians(static_cast<size_t>(regionsX) * regionsY);
   for (int ry = 0; ry < regionsY; ++ry) {
     for (int rx = 0; rx < regionsX; ++rx) {
@@ -19,10 +22,15 @@ std::vector<float> PointSelector::regionThresholds(const ImageLevel& img, int& r
       int count = 0;
       for (int v = ry * R; v < std::min((ry + 1) * R, img.height); ++v)
         for (int u = rx * R; u < std::min((rx + 1) * R, img.width); ++u) {
+          if (!mask.empty() && mask.at<uint8_t>(v, u) == 0) continue;
           const int bin = std::min(static_cast<int>(std::sqrt(img.gradNormSq[v * img.width + u])), kBins);
           ++hist[bin];
           ++count;
         }
+      if (count < R * R / 8) {
+        medians[ry * regionsX + rx] = kNoMedian;
+        continue;
+      }
       int acc = 0, bin = 0;
       while (bin < kBins && acc + hist[bin] < count / 2) acc += hist[bin++];
       medians[ry * regionsX + rx] = static_cast<float>(bin) + 0.5f;
@@ -38,11 +46,11 @@ std::vector<float> PointSelector::regionThresholds(const ImageLevel& img, int& r
       for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx) {
           const int x = rx + dx, y = ry + dy;
-          if (x < 0 || y < 0 || x >= regionsX || y >= regionsY) continue;
+          if (x < 0 || y < 0 || x >= regionsX || y >= regionsY || medians[y * regionsX + x] == kNoMedian) continue;
           sum += medians[y * regionsX + x];
           ++n;
         }
-      const float t = sum / n + m_settings.gradientOffset;
+      const float t = (n > 0 ? sum / n : 0.f) + m_settings.gradientOffset;
       thresholds[ry * regionsX + rx] = t * t;
     }
   return thresholds;
@@ -88,9 +96,10 @@ std::vector<Candidate> PointSelector::selectWithCellSize(const ImageLevel& img, 
 
 std::vector<Candidate> PointSelector::select(const ImageLevel& img, const cv::Mat& mask) const {
   int regionsX = 0, regionsY = 0;
-  const auto thresholds = regionThresholds(img, regionsX, regionsY);
+  const auto thresholds = regionThresholds(img, mask, regionsX, regionsY);
 
-  double cell = std::sqrt(double(img.width) * img.height / m_settings.targetPoints);
+  const double area = mask.empty() ? double(img.width) * img.height : double(cv::countNonZero(mask));
+  double cell = std::sqrt(area / m_settings.targetPoints);
   std::vector<Candidate> best;
   for (int it = 0; it < m_settings.adaptIterations; ++it) {
     const int c = std::max(1, static_cast<int>(std::lround(cell)));

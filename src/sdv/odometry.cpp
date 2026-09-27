@@ -159,7 +159,7 @@ void Odometry::selectCandidates(int keyframeId) {
   Keyframe& kf = m_keyframes.at(keyframeId);
   const ImageLevel& img = kf.image->level(0);
   const TraceSettings settings = candidateSettings();
-  for (const auto& c : m_selector.select(img))
+  for (const auto& c : m_selector.select(img, m_camera.maskImage()))
     if (auto p = ImmaturePoint::create(m_camera, img, c.uv.cast<double>(), settings))
       kf.immature.push_back(std::move(*p));
 }
