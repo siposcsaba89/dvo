@@ -24,19 +24,19 @@ namespace po = boost::program_options;
 namespace {
 
 sdv::ReferenceFrame makeReference(const sdv::WindowOptimizer& opt, const sdv::WindowFrame& kf, double gradientC) {
-  const sdv::Camera& cam = opt.camera();
+  const sdv::Camera& cam = opt.rig().cameras[0];
   std::vector<Eigen::Vector2i> pixels;
   std::vector<double> rhos;
   for (const auto& p : opt.points()) {
     if (p.host != kf.id && p.numGood() == 0) continue;
-    const Sophus::SE3d T_kf_h = kf.params.T_c_w * opt.frame(p.host).params.T_c_w.inverse();
+    const Sophus::SE3d T_kf_h = kf.params.T_b_w * opt.frame(p.host).params.T_b_w.inverse();
     const Eigen::Vector3d x = T_kf_h.so3() * p.bearing + p.rho * T_kf_h.translation();
     Eigen::Vector2d uv;
     if (!cam.project(x, uv) || !cam.isInside(uv.x(), uv.y(), 2.0)) continue;
     pixels.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
     rhos.push_back(p.rho / x.norm());
   }
-  return sdv::ReferenceFrame(cam, *kf.image, pixels, rhos, kf.params.affine, gradientC);
+  return sdv::ReferenceFrame(cam, *kf.images[0], pixels, rhos, kf.params.affine[0], gradientC);
 }
 
 }  // namespace
@@ -116,13 +116,13 @@ int main(int argc, char** argv) {
         T_f_ref = res.T_t_h;
         T_prev_prevprev = T_f_ref * T_prev_ref.inverse();
         T_prev_ref = T_f_ref;
-        affine = res.affine;
+        affine = res.affine[0];
       }
       framePoses.push_back({refId, T_f_ref});
 
       if (i % keyframeInterval != 0) continue;
       const auto t0 = Clock::now();
-      const Sophus::SE3d T_c_w = i == 0 ? Sophus::SE3d() : T_f_ref * opt.frame(refId).params.T_c_w;
+      const Sophus::SE3d T_c_w = i == 0 ? Sophus::SE3d() : T_f_ref * opt.frame(refId).params.T_b_w;
       const int id = opt.addFrame(pyr, T_c_w, affine);
       ++numKeyframes;
       const cv::Mat rho = sdv::stereoInverseDistance(left, seq.loadImage(start + i, 1), cam, seq.baseline());
@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
                       id, i, added, res.initialEnergy, res.finalEnergy, res.iterations, res.numGood,
                       res.numOutliers, res.numOutOfBounds);
       }
-      for (const auto& f : opt.frames()) keyframePoses[f.id] = f.params.T_c_w;
+      for (const auto& f : opt.frames()) keyframePoses[f.id] = f.params.T_b_w;
       if (static_cast<int>(opt.frames().size()) > windowSize) {
         if (noBa) {
           std::vector<int> hosted;
@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
 
       refId = id;
       const sdv::WindowFrame& kf = opt.frame(id);
-      affine = kf.params.affine;
+      affine = kf.params.affine[0];
       ref.emplace(makeReference(opt, kf, trackSettings.gradientWeightC));
       framePoses.back() = {id, Sophus::SE3d()};
       T_prev_ref = Sophus::SE3d();
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
     }
     if (!plyFile.empty()) {
       for (const auto& p : opt.points()) {
-        const Sophus::SE3d T_w_h = opt.frame(p.host).params.T_c_w.inverse();
+        const Sophus::SE3d T_w_h = opt.frame(p.host).params.T_b_w.inverse();
         const auto v = static_cast<uint8_t>(std::clamp(p.pattern.intensities[0], 0.f, 255.f));
         scene.addPoint(T_w_h * (p.bearing / p.rho), {v, v, v});
       }

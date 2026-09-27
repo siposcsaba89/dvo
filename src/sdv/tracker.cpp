@@ -64,21 +64,21 @@ ReferenceFrame::ReferenceFrame(const Camera& cam, const ImagePyramid& pyramid,
   }
 }
 
-FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const ImageLevel& img, int level,
-                                             const State& state, double cutoff, double exposureRatio,
-                                             bool withJacobians) const {
+FrameTracker::CameraSystem FrameTracker::linearizeCamera(const ReferenceFrame& ref, const ImageLevel& img, int level,
+                                                         const Sophus::SE3d& T_t_h, const AffineBrightness& affine,
+                                                         double cutoff, bool withJacobians) const {
   const Camera& cam = ref.camera(level);
   const AffineBrightness& host = ref.affine();
-  const double scale = exposureRatio * std::exp(state.affine.a - host.a);
+  const double scale = std::exp(affine.a - host.a);
   const double k = m_settings.huberThreshold;
   const double cutoffEnergy = huberEnergy(cutoff, k);
 
-  const Eigen::Matrix3d R = state.T_t_h.rotationMatrix();
-  const Eigen::Vector3d t = state.T_t_h.translation();
+  const Eigen::Matrix3d R = T_t_h.rotationMatrix();
+  const Eigen::Vector3d t = T_t_h.translation();
   const auto& points = ref.points(level);
-  std::vector<System> chunks(kParallelChunks);
+  std::vector<CameraSystem> chunks(kParallelChunks);
   parallelChunks(points.size(), [&](size_t c, size_t begin, size_t end) {
-    System& part = chunks[c];
+    CameraSystem& part = chunks[c];
     part.H.setZero();
     part.g.setZero();
     Eigen::Matrix<double, 1, 8> J;
@@ -93,7 +93,7 @@ FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const Im
       ++part.numVisible;
       const Eigen::Vector3f s = img.interpolate(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
       const double hostCentered = p.intensity - host.b;
-      const double r = (s[0] - state.affine.b) - scale * hostCentered;
+      const double r = (s[0] - affine.b) - scale * hostCentered;
       if (std::abs(r) > cutoff) {
         part.energy += p.gradientWeight * cutoffEnergy;
         continue;
@@ -110,10 +110,10 @@ FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const Im
     }
   });
 
-  System sys;
+  CameraSystem sys;
   sys.H.setZero();
   sys.g.setZero();
-  for (const System& part : chunks) {
+  for (const CameraSystem& part : chunks) {
     sys.H += part.H;
     sys.g += part.g;
     sys.energy += part.energy;
@@ -123,7 +123,7 @@ FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const Im
   }
 
   const double priors[2] = {m_settings.affinePriorA, m_settings.affinePriorB};
-  const double deltas[2] = {state.affine.a - host.a, state.affine.b - host.b};
+  const double deltas[2] = {affine.a - host.a, affine.b - host.b};
   for (int i = 0; i < 2; ++i) {
     if (priors[i] <= 0) continue;
     sys.H(6 + i, 6 + i) += priors[i];
@@ -133,23 +133,57 @@ FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const Im
   return sys;
 }
 
-FrameTracker::System FrameTracker::optimizeLevel(const ReferenceFrame& ref, const ImageLevel& img, int level,
-                                                 State& state, double cutoff, double exposureRatio, int maxIt) const {
-  System sys = linearize(ref, img, level, state, cutoff, exposureRatio, true);
+FrameTracker::System FrameTracker::linearize(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                                             const std::vector<const ImagePyramid*>& targets, int level,
+                                             const State& state, double cutoff, bool withJacobians) const {
+  const int nc = rig.size();
+  System sys;
+  sys.H = Eigen::MatrixXd::Zero(6 + 2 * nc, 6 + 2 * nc);
+  sys.g = Eigen::VectorXd::Zero(6 + 2 * nc);
+  for (int c = 0; c < nc; ++c) {
+    // Camera motion T_c_b T_t_h T_b_c; a left body increment is a left camera increment of Adj(T_c_b) xi.
+    const Sophus::SE3d& T_c_b = rig.T_c_b[c];
+    const CameraSystem cs = linearizeCamera(refs[c], targets[c]->level(level), level,
+                                            T_c_b * state.T_t_h * T_c_b.inverse(), state.affine[c], cutoff,
+                                            withJacobians);
+    sys.energy += cs.energy;
+    sys.numInliers += cs.numInliers;
+    sys.numVisible += cs.numVisible;
+    sys.numPoints += cs.numPoints;
+    if (!withJacobians) continue;
+    const Eigen::Matrix<double, 6, 6> adj = T_c_b.Adj();
+    const int a = 6 + 2 * c;
+    sys.H.topLeftCorner<6, 6>() += adj.transpose() * cs.H.topLeftCorner<6, 6>() * adj;
+    sys.H.block<6, 2>(0, a) += adj.transpose() * cs.H.topRightCorner<6, 2>();
+    sys.H.block<2, 6>(a, 0) += cs.H.bottomLeftCorner<2, 6>() * adj;
+    sys.H.block<2, 2>(a, a) += cs.H.bottomRightCorner<2, 2>();
+    sys.g.head<6>() += adj.transpose() * cs.g.head<6>();
+    sys.g.segment<2>(a) += cs.g.tail<2>();
+  }
+  return sys;
+}
+
+FrameTracker::System FrameTracker::optimizeLevel(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                                                 const std::vector<const ImagePyramid*>& targets, int level,
+                                                 State& state, double cutoff, int maxIt) const {
+  System sys = linearize(rig, refs, targets, level, state, cutoff, true);
   double lambda = 1e-3;
   for (int it = 0; it < maxIt && sys.numInliers > 8; ++it) {
-    Eigen::Matrix<double, 8, 8> A = sys.H;
+    Eigen::MatrixXd A = sys.H;
     A.diagonal() *= 1.0 + lambda;
     A.diagonal().array() += 1e-9;
-    const Eigen::Matrix<double, 8, 1> delta = -A.ldlt().solve(sys.g);
+    const Eigen::VectorXd delta = -A.ldlt().solve(sys.g);
 
-    State candidate;
+    State candidate = state;
     candidate.T_t_h = Sophus::SE3d::exp(delta.head<6>()) * state.T_t_h;
-    candidate.affine = {state.affine.a + delta[6], state.affine.b + delta[7]};
-    const System next = linearize(ref, img, level, candidate, cutoff, exposureRatio, false);
+    for (int c = 0; c < rig.size(); ++c) {
+      candidate.affine[c].a += delta[6 + 2 * c];
+      candidate.affine[c].b += delta[7 + 2 * c];
+    }
+    const System next = linearize(rig, refs, targets, level, candidate, cutoff, false);
     if (next.numInliers > 8 && next.normalizedEnergy() < sys.normalizedEnergy()) {
       state = candidate;
-      sys = linearize(ref, img, level, state, cutoff, exposureRatio, true);
+      sys = linearize(rig, refs, targets, level, state, cutoff, true);
       lambda = std::max(lambda * 0.5, 1e-7);
       if (delta.head<6>().norm() < m_settings.convergenceEps) break;
     } else {
@@ -160,23 +194,34 @@ FrameTracker::System FrameTracker::optimizeLevel(const ReferenceFrame& ref, cons
   return sys;
 }
 
-double FrameTracker::meanFlow(const ReferenceFrame& ref, const State& state) const {
+double FrameTracker::meanFlow(const Rig& rig, const std::vector<ReferenceFrame>& refs, const State& state) const {
   double sum = 0;
   int n = 0;
   Eigen::Vector2d uv;
-  for (const auto& p : ref.points(0)) {
-    if (!projectBearing(p.bearing, p.rho, state.T_t_h, ref.camera(0), uv)) continue;
-    sum += (uv - p.uv).norm();
-    ++n;
+  for (int c = 0; c < rig.size(); ++c) {
+    const Sophus::SE3d T = rig.T_c_b[c] * state.T_t_h * rig.T_c_b[c].inverse();
+    for (const auto& p : refs[c].points(0)) {
+      if (!projectBearing(p.bearing, p.rho, T, refs[c].camera(0), uv)) continue;
+      sum += (uv - p.uv).norm();
+      ++n;
+    }
   }
   return n > 0 ? sum / n : 0.0;
 }
 
 TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid& target,
                                    const std::vector<Sophus::SE3d>& hypotheses,
-                                   const AffineBrightness& initialAffine, double exposureRatio) const {
+                                   const AffineBrightness& initialAffine) const {
+  return track(Rig::mono(ref.camera(0)), {ref}, {&target}, hypotheses, {initialAffine});
+}
+
+TrackingResult FrameTracker::track(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                                   const std::vector<const ImagePyramid*>& targets,
+                                   const std::vector<Sophus::SE3d>& hypotheses,
+                                   const std::vector<AffineBrightness>& initialAffine) const {
   TrackingResult result;
-  const int top = std::min(ref.numLevels(), target.numLevels()) - 1;
+  int top = std::numeric_limits<int>::max();
+  for (int c = 0; c < rig.size(); ++c) top = std::min({top, refs[c].numLevels() - 1, targets[c]->numLevels() - 1});
   if (hypotheses.empty() || top < 0) return result;
 
   auto iterations = [&](int level) {
@@ -189,10 +234,10 @@ TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid
   std::iota(order.begin(), order.end(), size_t{0});
   std::for_each(std::execution::par, order.begin(), order.end(), [&](size_t i) {
     states[i] = {hypotheses[i], initialAffine};
-    systems[i] = optimizeLevel(ref, target.level(top), top, states[i], m_settings.outlierCutoff, exposureRatio,
+    systems[i] = optimizeLevel(rig, refs, targets, top, states[i], m_settings.outlierCutoff,
                                m_settings.hypothesisIterations);
   });
-  State best;
+  State best{Sophus::SE3d(), initialAffine};
   double bestRmse = std::numeric_limits<double>::infinity();
   for (size_t i = 0; i < hypotheses.size(); ++i) {
     const System& sys = systems[i];
@@ -209,7 +254,7 @@ TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid
     double cutoff = m_settings.outlierCutoff;
     for (int attempt = 0;; ++attempt) {
       State s = best;
-      sys = optimizeLevel(ref, target.level(l), l, s, cutoff, exposureRatio, iterations(l));
+      sys = optimizeLevel(rig, refs, targets, l, s, cutoff, iterations(l));
       if (sys.inlierRatio() >= m_settings.minInlierRatio || attempt >= m_settings.maxCutoffIncreases) {
         best = s;
         break;
@@ -223,7 +268,7 @@ TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid
   result.rmse = std::sqrt(sys.normalizedEnergy());
   result.inlierRatio = sys.inlierRatio();
   result.visibleRatio = sys.numPoints > 0 ? double(sys.numVisible) / sys.numPoints : 0.0;
-  result.meanFlow = meanFlow(ref, best);
+  result.meanFlow = meanFlow(rig, refs, best);
   result.ok = result.hypothesis >= 0 && result.inlierRatio >= m_settings.minInlierRatio &&
               result.visibleRatio >= m_settings.minVisibleRatio;
   return result;

@@ -126,10 +126,10 @@ int main(int argc, char** argv) {
         const Sophus::SE3d T_w_c = kf.T_w_c * res.T_t_h.inverse();
         T_prev_prevprev = res.T_t_h * T_prev_ref.inverse();
         T_prev_ref = res.T_t_h;
-        affine = res.affine;
+        affine = res.affine[0];
         poses.push_back(T_w_c);
         spdlog::debug("frame {}: rmse {:.2f} inliers {:.2f} flow {:.1f} hyp {} a {:.3f} b {:.2f}", i, res.rmse,
-                      res.inlierRatio, res.meanFlow, res.hypothesis, res.affine.a, res.affine.b);
+                      res.inlierRatio, res.meanFlow, res.hypothesis, res.affine[0].a, res.affine[0].b);
       }
 
       if (i % keyframeInterval == 0) {

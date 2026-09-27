@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <limits>
 
 #include <opencv2/core.hpp>
 #include <sophus/se3.hpp>
@@ -55,5 +56,61 @@ inline double trueRho(const Sophus::SE3d& T_c_w, const Eigen::Vector3d& bearing)
   const double s = (kDist - kNormal.dot(T_w_c.translation())) / denom;
   return s > 0 ? 1.0 / s : 0.0;
 }
+
+// Closed textured box around the origin (vehicle frame: x forward, y left, z up), visible from any direction, for
+// multi-camera rigs. Texture is defined on the two in-plane coordinates of each face, in metres.
+namespace room {
+
+inline const Eigen::Vector3d kMin(-8.0, -6.0, -1.5), kMax(8.0, 6.0, 2.5);
+
+inline double texture(double a, double b) {
+  return 128 + 50 * std::sin(a * 5.1) * std::cos(b * 6.3) + 30 * std::sin((a - 2 * b) * 3.7) +
+         20 * std::cos((3 * a + b) * 2.3);
+}
+
+// Distance along the unit ray from `origin` (inside the box) to the first face, and the texture value there.
+inline double castRay(const Eigen::Vector3d& origin, const Eigen::Vector3d& dir, double* value = nullptr) {
+  double best = std::numeric_limits<double>::infinity();
+  int axis = -1;
+  for (int i = 0; i < 3; ++i) {
+    if (std::abs(dir[i]) < 1e-12) continue;
+    const double s = ((dir[i] > 0 ? kMax[i] : kMin[i]) - origin[i]) / dir[i];
+    if (s > 0 && s < best) best = s, axis = i;
+  }
+  if (value && axis >= 0) {
+    const Eigen::Vector3d p = origin + best * dir;
+    *value = texture(p[(axis + 1) % 3], p[(axis + 2) % 3] + 10.0 * axis);
+  }
+  return best;
+}
+
+inline cv::Mat render(const sdv::Camera& cam, const Sophus::SE3d& T_c_w, double gain = 1.0, double offset = 0.0) {
+  const Sophus::SE3d T_w_c = T_c_w.inverse();
+  cv::Mat img(cam.height, cam.width, CV_32F, cv::Scalar(0));
+  for (int v = 0; v < cam.height; ++v)
+    for (int u = 0; u < cam.width; ++u) {
+      Eigen::Vector3d b;
+      if (!cam.unproject(Eigen::Vector2d(u, v), b)) continue;
+      double value = 0;
+      castRay(T_w_c.translation(), T_w_c.so3() * b, &value);
+      img.at<float>(v, u) = static_cast<float>(gain * value + offset);
+    }
+  return img;
+}
+
+inline double trueRho(const Sophus::SE3d& T_c_w, const Eigen::Vector3d& bearing) {
+  const Sophus::SE3d T_w_c = T_c_w.inverse();
+  return 1.0 / castRay(T_w_c.translation(), T_w_c.so3() * bearing);
+}
+
+// OpenCV camera looking along body +x (front) or -x (rear), mounted at `position` in the body frame.
+inline Sophus::SE3d cameraFromBody(bool front, const Eigen::Vector3d& position) {
+  Eigen::Matrix3d R_b_c;
+  if (front) R_b_c << 0, 0, 1, -1, 0, 0, 0, -1, 0;
+  else R_b_c << 0, 0, -1, 1, 0, 0, 0, -1, 0;
+  return Sophus::SE3d(R_b_c, position).inverse();
+}
+
+}  // namespace room
 
 }  // namespace synthetic

@@ -14,6 +14,7 @@
 #include <sdv/mono_initializer.h>
 #include <sdv/point_selector.h>
 #include <sdv/profiler.h>
+#include <sdv/rig.h>
 #include <sdv/tracker.h>
 #include <sdv/window_optimizer.h>
 
@@ -26,9 +27,9 @@ struct OdometrySettings {
   TrackingSettings tracking;
   WindowSettings window;
   TraceSettings trace;
-  int candidatesPerKeyframe = 1500;
+  int candidatesPerKeyframe = 1500;  // per camera
   int maxKeyframes = 7;
-  int targetActivePoints = 2000;
+  int targetActivePoints = 2000;  // per camera
   int windowIterations = 6;
   double activationMaxErrorPixels = 2.0;
   int activationMinGood = 1;
@@ -39,16 +40,17 @@ struct OdometrySettings {
   double kfBrightness = 0.7;
   double kfRmseFactor = 2.0;
   double marginalizeVisibleFraction = 0.05;  // DSO §3.1
-  double stereoMinDepth = 1.5;  // bounds the initial stereo search range
+  double stereoMinDepth = 1.5;  // bounds the initial search range between cameras of one keyframe
   int stereoMaxSamples = 400;
-  bool checkCalibration = false;  // stereo: log the temporal vs stereo depth bias at every keyframe
+  bool checkCalibration = false;  // multi-camera: log the temporal vs static depth bias at every keyframe
 };
 
 struct MapPoint {
   Eigen::Vector3d position;  // world
   float intensity;
   int frameIndex;  // input frame of the host keyframe
-  Eigen::Vector2d uv;  // pixel in the host keyframe
+  int camera;  // host camera
+  Eigen::Vector2d uv;  // pixel in the host camera image
   double distance;  // from the host camera
 };
 
@@ -61,44 +63,47 @@ struct OdometryFrameInfo {
   int immaturePoints = 0;
 };
 
-// Direct sparse odometry: initialisation, frame tracking, candidate tracing, keyframe window optimisation and
-// marginalisation. Monocular by default; with a stereo rig, keyframes add static stereo constraints (metric
-// scale) and initialisation uses stereo depth.
+// Direct sparse odometry for a rig of one or more cameras: initialisation, frame tracking, candidate tracing,
+// keyframe window optimisation and marginalisation. A single camera initialises monocularly; with several cameras,
+// candidates are matched between cameras of the same keyframe, which gives metric depth from the extrinsics.
 class Odometry {
  public:
-  Odometry(const Camera& cam, OdometrySettings settings = {});
+  Odometry(const Rig& rig, OdometrySettings settings = {});
+  Odometry(const Camera& cam, OdometrySettings settings = {}) : Odometry(Rig::mono(cam), std::move(settings)) {}
 
-  // T_r_l maps left-camera to right-camera coordinates. Must be called before the first frame.
-  void enableStereo(const Camera& rightCam, const Sophus::SE3d& T_r_l);
-  // `right` is required in stereo mode.
-  OdometryFrameInfo addFrame(const cv::Mat& image, const cv::Mat& right = {});
+  // One image per rig camera, taken at the same time.
+  OdometryFrameInfo addFrame(const std::vector<cv::Mat>& images);
+  OdometryFrameInfo addFrame(const cv::Mat& image) { return addFrame(std::vector{image}); }
 
   bool initialized() const { return m_initialized; }
-  // T_w_c per input frame, final estimates; empty for frames before initialisation.
+  // T_w_b per input frame, final estimates; empty for frames before initialisation.
   std::vector<std::optional<Sophus::SE3d>> poses() const;
   // Marginalised points plus the active points still in the window.
   std::vector<MapPoint> mapPoints() const;
   std::vector<int> keyframeIndices() const;
+  const Rig& rig() const { return m_rig; }
   const StageProfile& profile() const { return m_profile; }
 
  private:
+  using Pyramids = std::vector<std::shared_ptr<const ImagePyramid>>;
   struct Keyframe {
     int frameIndex;
-    std::shared_ptr<const ImagePyramid> image;
-    std::vector<ImmaturePoint> immature;
+    Pyramids images;
+    std::vector<std::vector<ImmaturePoint>> immature;  // per host camera
   };
   struct FrameRecord {
     int keyframe = -1;  // optimizer frame id of the reference keyframe
-    Sophus::SE3d T_f_kf;
+    Sophus::SE3d T_f_kf;  // body
   };
 
-  void initializeFromMono(const MonoInitResult& res, std::shared_ptr<const ImagePyramid> current);
-  int createKeyframe(std::shared_ptr<const ImagePyramid> image, const Sophus::SE3d& T_c_w,
-                     const AffineBrightness& affine);
+  bool multiCamera() const { return m_rig.size() > 1; }
+  void initializeFromMono(const MonoInitResult& res, const Pyramids& current);
+  int createKeyframe(const Pyramids& images, const Sophus::SE3d& T_b_w, const std::vector<AffineBrightness>& affine);
   void selectCandidates(int keyframeId);
-  void traceStereo(int keyframeId, std::shared_ptr<const ImagePyramid> right);
+  void traceStatic(int keyframeId);
+  void estimateStaticBrightness(int keyframeId);
   TraceSettings candidateSettings() const;
-  void traceCandidates(const ImagePyramid& image, const Sophus::SE3d& T_c_w, const AffineBrightness& affine);
+  void traceCandidates(const Pyramids& images, const Sophus::SE3d& T_b_w, const std::vector<AffineBrightness>& affine);
   void activateCandidates(int newKeyframeId);
   void removeOutlierPoints();
   void marginalizeKeyframes();
@@ -107,17 +112,14 @@ class Odometry {
   bool needKeyframe(const TrackingResult& res) const;
   double translationFlow(const Sophus::SE3d& T_f_ref) const;
   void storeKeyframePoses();
+  MapPoint mapPoint(const WindowPoint& p) const;
 
-  Camera m_camera;
+  Rig m_rig;
   OdometrySettings m_settings;
   MonoInitializer m_initializer;
   FrameTracker m_tracker;
   WindowOptimizer m_window;
   PointSelector m_selector;
-
-  std::optional<Camera> m_rightCam;
-  Sophus::SE3d m_T_r_l;
-  cv::Mat m_currentRight;
 
   bool m_initialized = false;
   int m_frameCount = 0;
@@ -125,14 +127,14 @@ class Odometry {
   int m_initHostIndex = -1;
 
   std::map<int, Keyframe> m_keyframes;  // by optimizer frame id, window only
-  std::map<int, Sophus::SE3d> m_keyframePoses;  // T_c_w, latest estimate, also marginalised ones
+  std::map<int, Sophus::SE3d> m_keyframePoses;  // T_b_w, latest estimate, also marginalised ones
   std::map<int, int> m_keyframeFrameIndex;
   std::vector<FrameRecord> m_frames;
   std::vector<MapPoint> m_marginalizedPoints;
 
-  std::optional<ReferenceFrame> m_reference;
+  std::vector<ReferenceFrame> m_reference;  // per camera
   int m_referenceId = -1;
-  AffineBrightness m_lastAffine;
+  std::vector<AffineBrightness> m_lastAffine;
   Sophus::SE3d m_T_prev_ref, m_T_prev_prevprev;
   double m_referenceRmse = -1;
   double m_activationCell;

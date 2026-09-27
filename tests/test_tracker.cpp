@@ -43,8 +43,8 @@ TEST_P(TrackerTest, RecoversMotionAndBrightness) {
   const Sophus::Vector6d err = (res.T_t_h * T_t_h.inverse()).log();
   EXPECT_LT(err.head<3>().norm(), 2e-3);
   EXPECT_LT(err.tail<3>().norm(), 5e-4);
-  EXPECT_NEAR(std::exp(res.affine.a), gain, 0.01);
-  EXPECT_NEAR(res.affine.b, offset, 1.0);
+  EXPECT_NEAR(std::exp(res.affine[0].a), gain, 0.01);
+  EXPECT_NEAR(res.affine[0].b, offset, 1.0);
   EXPECT_GT(res.inlierRatio, 0.9);
 }
 

@@ -24,35 +24,29 @@ PointSelectorSettings selectorSettings(const OdometrySettings& s) {
 
 }  // namespace
 
-Odometry::Odometry(const Camera& cam, OdometrySettings settings)
-    : m_camera(cam),
+Odometry::Odometry(const Rig& rig, OdometrySettings settings)
+    : m_rig(rig),
       m_settings(std::move(settings)),
-      m_initializer(cam, m_settings.levels, m_settings.init),
+      m_initializer(rig.cameras.at(0), m_settings.levels, m_settings.init),
       m_tracker(m_settings.tracking),
-      m_window(cam, m_settings.window),
+      m_window(rig, m_settings.window),
       m_selector(selectorSettings(m_settings)),
+      m_lastAffine(rig.size()),
       m_activationCell(m_settings.initialActivationCell) {}
 
-void Odometry::enableStereo(const Camera& rightCam, const Sophus::SE3d& T_r_l) {
-  if (m_frameCount > 0) throw std::logic_error("enableStereo must be called before the first frame");
-  m_rightCam = rightCam;
-  m_T_r_l = T_r_l;
-  m_window.setStereo(rightCam, T_r_l);
-}
-
-OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right) {
-  if (m_rightCam && right.empty()) throw std::invalid_argument("stereo odometry needs the right image");
+OdometryFrameInfo Odometry::addFrame(const std::vector<cv::Mat>& images) {
+  if (static_cast<int>(images.size()) != m_rig.size()) throw std::invalid_argument("one image per rig camera required");
   OdometryFrameInfo info;
   const int index = m_frameCount++;
   m_frames.emplace_back();
-  m_currentRight = right;
-  std::shared_ptr<const ImagePyramid> pyr;
+  Pyramids pyr(m_rig.size());
   {
     auto t = m_profile.scope("pyramid");
-    pyr = std::make_shared<const ImagePyramid>(toFloatGray(image), m_settings.levels);
+    for (int c = 0; c < m_rig.size(); ++c)
+      pyr[c] = std::make_shared<const ImagePyramid>(toFloatGray(images[c]), m_settings.levels);
   }
 
-  if (!m_initialized && m_rightCam) {
+  if (!m_initialized && multiCamera()) {
     m_initialized = true;
     const int id = createKeyframe(pyr, Sophus::SE3d(), {});
     m_frames.back() = {id, Sophus::SE3d()};
@@ -64,14 +58,14 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   if (!m_initialized) {
     auto t = m_profile.scope("mono init");
     if (!m_initHost) {
-      m_initializer.reset(*pyr);
-      m_initHost = pyr;
+      m_initializer.reset(*pyr[0]);
+      m_initHost = pyr[0];
       m_initHostIndex = index;
       return info;
     }
-    const MonoInitResult res = m_initializer.addFrame(*pyr);
+    const MonoInitResult res = m_initializer.addFrame(*pyr[0]);
     if (res.reset) {
-      m_initHost = pyr;
+      m_initHost = pyr[0];
       m_initHostIndex = index;
       return info;
     }
@@ -85,7 +79,10 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   TrackingResult res;
   {
     auto t = m_profile.scope("track");
-    res = m_tracker.track(*m_reference, *pyr, makeMotionHypotheses(m_T_prev_ref, m_T_prev_prevprev), m_lastAffine);
+    std::vector<const ImagePyramid*> targets;
+    for (const auto& p : pyr) targets.push_back(p.get());
+    res = m_tracker.track(m_rig, m_reference, targets, makeMotionHypotheses(m_T_prev_ref, m_T_prev_prevprev),
+                          m_lastAffine);
   }
   m_T_prev_prevprev = res.T_t_h * m_T_prev_ref.inverse();
   m_T_prev_ref = res.T_t_h;
@@ -93,27 +90,28 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   m_frames.back() = {m_referenceId, res.T_t_h};
   if (m_referenceRmse < 0) m_referenceRmse = res.rmse;
 
-  const Sophus::SE3d T_c_w = res.T_t_h * m_window.frame(m_referenceId).params.T_c_w;
+  const Sophus::SE3d T_b_w = res.T_t_h * m_window.frame(m_referenceId).params.T_b_w;
   {
     auto t = m_profile.scope("trace");
-    traceCandidates(*pyr, T_c_w, res.affine);
+    traceCandidates(pyr, T_b_w, res.affine);
   }
   info.initialized = true;
   info.trackingOk = res.ok;
   info.rmse = res.rmse;
   if (needKeyframe(res)) {
-    const int id = createKeyframe(pyr, T_c_w, res.affine);
+    const int id = createKeyframe(pyr, T_b_w, res.affine);
     m_frames.back() = {id, Sophus::SE3d()};
     info.keyframe = true;
   }
   info.activePoints = static_cast<int>(m_window.points().size());
-  for (const auto& [id, kf] : m_keyframes) info.immaturePoints += static_cast<int>(kf.immature.size());
+  for (const auto& [id, kf] : m_keyframes)
+    for (const auto& cam : kf.immature) info.immaturePoints += static_cast<int>(cam.size());
   return info;
 }
 
-void Odometry::initializeFromMono(const MonoInitResult& res, std::shared_ptr<const ImagePyramid> current) {
+void Odometry::initializeFromMono(const MonoInitResult& res, const Pyramids& current) {
   const int host = m_window.addFrame(m_initHost, Sophus::SE3d());
-  m_keyframes[host] = {m_initHostIndex, m_initHost, {}};
+  m_keyframes[host] = {m_initHostIndex, {m_initHost}, std::vector<std::vector<ImmaturePoint>>(1)};
   m_keyframeFrameIndex[host] = m_initHostIndex;
   m_frames[m_initHostIndex] = {host, Sophus::SE3d()};
   for (const auto& p : m_initializer.points())
@@ -121,22 +119,23 @@ void Odometry::initializeFromMono(const MonoInitResult& res, std::shared_ptr<con
   selectCandidates(host);
   m_initialized = true;
 
-  traceCandidates(*current, res.T_t_h, res.affine);
-  const int id = createKeyframe(current, res.T_t_h, res.affine);
+  traceCandidates(current, res.T_t_h, {res.affine});
+  const int id = createKeyframe(current, res.T_t_h, {res.affine});
   m_frames.back() = {id, Sophus::SE3d()};
 }
 
-int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const Sophus::SE3d& T_c_w,
-                                 const AffineBrightness& affine) {
+int Odometry::createKeyframe(const Pyramids& images, const Sophus::SE3d& T_b_w,
+                             const std::vector<AffineBrightness>& affine) {
   const int index = m_frameCount - 1;
-  const int id = m_window.addFrame(image, T_c_w, affine);
-  m_keyframes[id] = {index, image, {}};
+  const int id = m_window.addFrame(images, T_b_w, affine);
+  m_keyframes[id] = {index, images, std::vector<std::vector<ImmaturePoint>>(m_rig.size())};
   m_keyframeFrameIndex[id] = index;
-  if (m_rightCam) {
-    // Stereo: new candidates get a metric depth interval from the right image before activation.
-    auto t = m_profile.scope("kf select+stereo");
+  if (multiCamera()) {
+    // Several cameras: new candidates get a metric depth interval from the other cameras before activation.
+    auto t = m_profile.scope("kf select+static");
     selectCandidates(id);
-    traceStereo(id, std::make_shared<const ImagePyramid>(toFloatGray(m_currentRight), 1));
+    traceStatic(id);
+    if (m_window.frames().size() == 1) estimateStaticBrightness(id);
   }
 
   const size_t before = m_window.points().size();
@@ -149,7 +148,7 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
     auto t = m_profile.scope("kf window BA");
     m_window.optimize(m_settings.windowIterations);
   }
-  if (m_settings.checkCalibration) m_window.logStereoDepthBias();
+  if (m_settings.checkCalibration) m_window.logStaticDepthBias();
   size_t kept;
   {
     auto t = m_profile.scope("kf marginalize");
@@ -160,7 +159,7 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
   }
   spdlog::debug("keyframe {}: points {} +{} activated -{} outliers -{} marginalised, activation cell {:.1f}", index,
                 before, activated - before, activated - kept, kept - m_window.points().size(), m_activationCell);
-  if (!m_rightCam) {
+  if (!multiCamera()) {
     auto t = m_profile.scope("kf select");
     selectCandidates(id);
   }
@@ -176,7 +175,7 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
 
 TraceSettings Odometry::candidateSettings() const {
   TraceSettings s = m_settings.trace;
-  if (m_rightCam) {
+  if (multiCamera()) {
     s.rhoMaxInit = 1.0 / m_settings.stereoMinDepth;
     s.maxSamples = m_settings.stereoMaxSamples;
   }
@@ -185,99 +184,153 @@ TraceSettings Odometry::candidateSettings() const {
 
 void Odometry::selectCandidates(int keyframeId) {
   Keyframe& kf = m_keyframes.at(keyframeId);
-  const ImageLevel& img = kf.image->level(0);
   const TraceSettings settings = candidateSettings();
-  for (const auto& c : m_selector.select(img, m_camera.maskImage()))
-    if (auto p = ImmaturePoint::create(m_camera, img, c.uv.cast<double>(), settings))
-      kf.immature.push_back(std::move(*p));
+  for (int c = 0; c < m_rig.size(); ++c) {
+    const ImageLevel& img = kf.images[c]->level(0);
+    for (const auto& cand : m_selector.select(img, m_rig.cameras[c].maskImage()))
+      if (auto p = ImmaturePoint::create(m_rig.cameras[c], img, cand.uv.cast<double>(), settings))
+        kf.immature[c].push_back(std::move(*p));
+  }
 }
 
-void Odometry::traceStereo(int keyframeId, std::shared_ptr<const ImagePyramid> right) {
+void Odometry::traceStatic(int keyframeId) {
   Keyframe& kf = m_keyframes.at(keyframeId);
-  const ImageLevel& img = right->level(0);
-  HostTargetState state;
-  state.T_t_h = m_T_r_l;
+  const std::vector<AffineBrightness>& affine = m_window.frame(keyframeId).params.affine;
   const TraceSettings settings = candidateSettings();
-  parallelChunks(kf.immature.size(), [&](size_t, size_t begin, size_t end) {
-    for (size_t i = begin; i < end; ++i) kf.immature[i].trace(*m_rightCam, img, state, settings);
-  });
+  for (int c = 0; c < m_rig.size(); ++c) {
+    auto& points = kf.immature[c];
+    parallelChunks(points.size(), [&](size_t, size_t begin, size_t end) {
+      for (size_t i = begin; i < end; ++i) {
+        for (int other = 0; other < m_rig.size(); ++other) {
+          if (other == c) continue;
+          HostTargetState state;
+          state.T_t_h = m_rig.T_to_from(other, c);
+          state.host = affine[c];
+          state.target = affine[other];
+          // A camera that cannot see the point must not undo a match in another camera.
+          ImmaturePoint traced = points[i];
+          if (traced.trace(m_rig.cameras[other], kf.images[other]->level(0), state, settings) !=
+              TraceStatus::OutOfBounds)
+            points[i] = std::move(traced);
+        }
+      }
+    });
+  }
+}
 
-  // Left/right gain and offset from the matched patterns (least squares on I_r = g * I_l + b).
-  double sx = 0, sy = 0, sxx = 0, sxy = 0;
-  int n = 0;
-  for (const auto& p : kf.immature) {
-    if (p.lastStatus() != TraceStatus::Good) continue;
-    for (int k = 0; k < kPatternSize; ++k) {
-      Eigen::Vector2d uv;
-      if (!projectBearing(p.pattern().bearings[k], p.rho(), m_T_r_l, *m_rightCam, uv) ||
-          !m_rightCam->isInside(uv.x(), uv.y(), 1.0))
-        continue;
-      const double x = p.pattern().intensities[k];
-      const double y = img.interpolateIntensity(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
-      sx += x;
-      sy += y;
-      sxx += x * x;
-      sxy += x * y;
-      ++n;
+void Odometry::estimateStaticBrightness(int keyframeId) {
+  // Gain and offset of each camera relative to camera 0 from the matched patterns (least squares on
+  // I_other = g * I_0 + b); later keyframes get theirs from tracking.
+  const Keyframe& kf = m_keyframes.at(keyframeId);
+  KeyframeParams params = m_window.frame(keyframeId).params;
+  for (int other = 1; other < m_rig.size(); ++other) {
+    const Sophus::SE3d T = m_rig.T_to_from(other, 0);
+    const Camera& cam = m_rig.cameras[other];
+    const ImageLevel& img = kf.images[other]->level(0);
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    int n = 0;
+    for (const auto& p : kf.immature[0]) {
+      if (p.lastStatus() != TraceStatus::Good) continue;
+      for (int k = 0; k < kPatternSize; ++k) {
+        Eigen::Vector2d uv;
+        if (!projectBearing(p.pattern().bearings[k], p.rho(), T, cam, uv) || !cam.isInside(uv.x(), uv.y(), 1.0))
+          continue;
+        const double x = p.pattern().intensities[k];
+        const double y = img.interpolateIntensity(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+        ++n;
+      }
+    }
+    const double det = n * sxx - sx * sx;
+    if (n > 200 && det > 1e-9) {
+      const double gain = (n * sxy - sx * sy) / det;
+      if (gain > 0.5 && gain < 2.0) params.affine[other] = {std::log(gain), (sy - gain * sx) / n};
     }
   }
-  AffineBrightness stereoAffine;
-  const double det = n * sxx - sx * sx;
-  if (n > 200 && det > 1e-9) {
-    const double gain = (n * sxy - sx * sy) / det;
-    if (gain > 0.5 && gain < 2.0) stereoAffine = {std::log(gain), (sy - gain * sx) / n};
-  }
-  m_window.setFrameStereo(keyframeId, std::move(right), stereoAffine);
+  m_window.setFrameParams(keyframeId, params);
 }
 
-void Odometry::traceCandidates(const ImagePyramid& image, const Sophus::SE3d& T_c_w,
-                                   const AffineBrightness& affine) {
+void Odometry::traceCandidates(const Pyramids& images, const Sophus::SE3d& T_b_w,
+                               const std::vector<AffineBrightness>& affine) {
   for (auto& [id, kf] : m_keyframes) {
     const WindowFrame& host = m_window.frame(id);
-    HostTargetState state;
-    state.T_t_h = T_c_w * host.params.T_c_w.inverse();
-    state.host = host.params.affine;
-    state.target = affine;
-    parallelChunks(kf.immature.size(), [&](size_t, size_t begin, size_t end) {
-      for (size_t i = begin; i < end; ++i) kf.immature[i].trace(m_camera, image.level(0), state, m_settings.trace);
-    });
-    std::erase_if(kf.immature, [](const ImmaturePoint& p) {
-      return p.lastStatus() == TraceStatus::OutOfBounds || p.numOutliers() > p.numGood() + 2;
-    });
+    for (int c = 0; c < m_rig.size(); ++c) {
+      HostTargetState state;
+      state.T_t_h = m_rig.T_c_b[c] * T_b_w * host.params.T_b_w.inverse() * m_rig.T_c_b[c].inverse();
+      state.host = host.params.affine[c];
+      state.target = affine[c];
+      auto& points = kf.immature[c];
+      parallelChunks(points.size(), [&](size_t, size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i)
+          points[i].trace(m_rig.cameras[c], images[c]->level(0), state, m_settings.trace);
+      });
+      std::erase_if(points, [](const ImmaturePoint& p) {
+        return p.lastStatus() == TraceStatus::OutOfBounds || p.numOutliers() > p.numGood() + 2;
+      });
+    }
   }
 }
 
 void Odometry::activateCandidates(int newKeyframeId) {
-  const WindowFrame& target = m_window.frame(newKeyframeId);
+  const int nc = m_rig.size();
   const int cell = std::max(2, static_cast<int>(std::lround(m_activationCell)));
-  const int gw = (m_camera.width + cell - 1) / cell, gh = (m_camera.height + cell - 1) / cell;
-  std::vector<char> occupied(static_cast<size_t>(gw) * gh, 0);
-  auto cellOf = [&](const Sophus::SE3d& T_t_h, const Eigen::Vector3d& bearing, double rho) {
-    Eigen::Vector2d uv;
-    if (!projectBearing(bearing, rho, T_t_h, m_camera, uv) || !m_camera.isInside(uv.x(), uv.y(), 0.0)) return -1;
-    return static_cast<int>(uv.y()) / cell * gw + static_cast<int>(uv.x()) / cell;
+  std::vector<int> gridWidth(nc);
+  std::vector<std::vector<char>> occupied(nc);
+  std::vector<Sophus::SE3d> T_t_w(nc);
+  for (int c = 0; c < nc; ++c) {
+    const Camera& cam = m_rig.cameras[c];
+    gridWidth[c] = (cam.width + cell - 1) / cell;
+    occupied[c].assign(static_cast<size_t>(gridWidth[c]) * ((cam.height + cell - 1) / cell), 0);
+    T_t_w[c] = m_window.cameraPose(newKeyframeId, c);
+  }
+  // Cells of all cameras of the new keyframe the point projects into (-1 where it does not).
+  auto cellsOf = [&](const Sophus::SE3d& T_h_w, const Eigen::Vector3d& bearing, double rho) {
+    std::vector<int> cells(nc, -1);
+    for (int c = 0; c < nc; ++c) {
+      Eigen::Vector2d uv;
+      const Camera& cam = m_rig.cameras[c];
+      if (projectBearing(bearing, rho, T_t_w[c] * T_h_w.inverse(), cam, uv) && cam.isInside(uv.x(), uv.y(), 0.0))
+        cells[c] = static_cast<int>(uv.y()) / cell * gridWidth[c] + static_cast<int>(uv.x()) / cell;
+    }
+    return cells;
   };
 
   for (const auto& p : m_window.points()) {
-    const Sophus::SE3d T_t_h = target.params.T_c_w * m_window.frame(p.host).params.T_c_w.inverse();
-    if (const int c = cellOf(T_t_h, p.bearing, p.rho); c >= 0) occupied[c] = 1;
+    const auto cells = cellsOf(m_window.cameraPose(p.host, p.hostCam), p.bearing, p.rho);
+    for (int c = 0; c < nc; ++c)
+      if (cells[c] >= 0) occupied[c][cells[c]] = 1;
   }
 
+  // A cell taken in any camera rejects the candidate, so a surface seen by two cameras is hosted only once.
   for (auto& [id, kf] : m_keyframes) {
-    if (id == newKeyframeId && !m_rightCam) continue;  // in stereo mode its own candidates are stereo-matched
-    const Sophus::SE3d T_t_h = target.params.T_c_w * m_window.frame(id).params.T_c_w.inverse();
-    std::erase_if(kf.immature, [&](const ImmaturePoint& p) {
-      if (p.lastStatus() != TraceStatus::Good || p.numGood() < m_settings.activationMinGood ||
-          p.lastErrorPixels() > m_settings.activationMaxErrorPixels || p.rho() <= 0)
-        return false;
-      const int c = cellOf(T_t_h, p.bearing(), p.rho());
-      if (c < 0 || occupied[c]) return false;
-      occupied[c] = 1;
-      return m_window.addPoint(id, p.pattern().uv, p.rho()) >= 0;
-    });
+    if (id == newKeyframeId && !multiCamera()) continue;  // with several cameras its own candidates are matched
+    for (int hc = 0; hc < nc; ++hc) {
+      const Sophus::SE3d T_h_w = m_window.cameraPose(id, hc);
+      std::erase_if(kf.immature[hc], [&](const ImmaturePoint& p) {
+        if (p.lastStatus() != TraceStatus::Good || p.numGood() < m_settings.activationMinGood ||
+            p.lastErrorPixels() > m_settings.activationMaxErrorPixels || p.rho() <= 0)
+          return false;
+        const auto cells = cellsOf(T_h_w, p.bearing(), p.rho());
+        bool visible = false;
+        for (int c = 0; c < nc; ++c) {
+          if (cells[c] < 0) continue;
+          if (occupied[c][cells[c]]) return false;
+          visible = true;
+        }
+        if (!visible) return false;
+        if (m_window.addPoint(id, p.pattern().uv, p.rho(), hc) < 0) return false;
+        for (int c = 0; c < nc; ++c)
+          if (cells[c] >= 0) occupied[c][cells[c]] = 1;
+        return true;
+      });
+    }
   }
 
-  const double ratio = static_cast<double>(m_window.points().size()) / m_settings.targetActivePoints;
+  const double ratio =
+      static_cast<double>(m_window.points().size()) / (static_cast<double>(m_settings.targetActivePoints) * nc);
   m_activationCell = std::clamp(m_activationCell * std::sqrt(std::max(ratio, 0.25)), 3.0, 40.0);
 }
 
@@ -312,7 +365,7 @@ void Odometry::marginalizeKeyframes() {
   while (static_cast<int>(m_window.frames().size()) > m_settings.maxKeyframes) {
     const auto& frames = m_window.frames();
     const size_t n = frames.size();
-    auto center = [&](size_t i) { return frames[i].params.T_c_w.inverse().translation(); };
+    auto center = [&](size_t i) { return frames[i].params.T_b_w.inverse().translation(); };
     // Distance score, DSO §3.1: keeps keyframes close to the newest one while spreading out the others.
     constexpr double eps = 1e-4;
     size_t best = 0;
@@ -331,67 +384,76 @@ void Odometry::marginalizeKeyframes() {
   }
 }
 
+MapPoint Odometry::mapPoint(const WindowPoint& p) const {
+  const ImageLevel& img = m_window.frame(p.host).images[p.hostCam]->level(0);
+  return {m_window.cameraPose(p.host, p.hostCam).inverse() * (p.bearing / p.rho),
+          img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()), static_cast<float>(p.pattern.uv.y())),
+          m_keyframeFrameIndex.at(p.host), p.hostCam, p.pattern.uv, 1.0 / p.rho};
+}
+
 void Odometry::marginalize(int keyframeId) {
-  const WindowFrame& f = m_window.frame(keyframeId);
-  const Sophus::SE3d T_w_c = f.params.T_c_w.inverse();
-  const ImageLevel& img = f.image->level(0);
   for (const auto& p : m_window.points())
-    if (p.host == keyframeId && p.numGood() > 0 && p.rho > kMinMapRho)
-      m_marginalizedPoints.push_back({T_w_c * (p.bearing / p.rho),
-                                      img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()),
-                                                               static_cast<float>(p.pattern.uv.y())),
-                                      m_keyframeFrameIndex.at(keyframeId), p.pattern.uv, 1.0 / p.rho});
-  m_keyframePoses[keyframeId] = f.params.T_c_w;
+    if (p.host == keyframeId && p.numGood() > 0 && p.rho > kMinMapRho) m_marginalizedPoints.push_back(mapPoint(p));
+  m_keyframePoses[keyframeId] = m_window.frame(keyframeId).params.T_b_w;
   m_window.marginalizeFrame(keyframeId);
   m_keyframes.erase(keyframeId);
 }
 
 void Odometry::buildReference() {
   const WindowFrame& kf = m_window.frame(m_referenceId);
-  std::vector<Eigen::Vector2i> pixels;
-  std::vector<double> rhos;
-  for (const auto& p : m_window.points()) {
-    if (p.host != kf.id && p.numGood() == 0) continue;
-    const Sophus::SE3d T_kf_h = kf.params.T_c_w * m_window.frame(p.host).params.T_c_w.inverse();
-    const Eigen::Vector3d x = T_kf_h.so3() * p.bearing + p.rho * T_kf_h.translation();
-    Eigen::Vector2d uv;
-    if (!m_camera.project(x, uv) || !m_camera.isInside(uv.x(), uv.y(), 2.0)) continue;
-    pixels.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-    rhos.push_back(p.rho / x.norm());
+  m_reference.clear();
+  for (int c = 0; c < m_rig.size(); ++c) {
+    const Camera& cam = m_rig.cameras[c];
+    const Sophus::SE3d T_c_w = m_window.cameraPose(kf.id, c);
+    std::vector<Eigen::Vector2i> pixels;
+    std::vector<double> rhos;
+    for (const auto& p : m_window.points()) {
+      if (p.host != kf.id && p.numGood() == 0) continue;
+      const Sophus::SE3d T_c_h = T_c_w * m_window.cameraPose(p.host, p.hostCam).inverse();
+      const Eigen::Vector3d x = T_c_h.so3() * p.bearing + p.rho * T_c_h.translation();
+      Eigen::Vector2d uv;
+      if (!cam.project(x, uv) || !cam.isInside(uv.x(), uv.y(), 2.0)) continue;
+      pixels.emplace_back(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
+      rhos.push_back(p.rho / x.norm());
+    }
+    m_reference.emplace_back(cam, *kf.images[c], pixels, rhos, kf.params.affine[c], m_settings.tracking.gradientWeightC);
   }
-  m_reference.emplace(m_camera, *kf.image, pixels, rhos, kf.params.affine, m_settings.tracking.gradientWeightC);
 }
 
 double Odometry::translationFlow(const Sophus::SE3d& T_f_ref) const {
-  const auto& pts = m_reference->points(0);
   double sum = 0;
   int n = 0;
   Eigen::Vector2d full, rot;
-  for (size_t i = 0; i < pts.size(); i += 4) {
-    const Eigen::Vector3d r = T_f_ref.so3() * pts[i].bearing;
-    if (!m_camera.project(Eigen::Vector3d(r + pts[i].rho * T_f_ref.translation()), full) ||
-        !m_camera.project(r, rot))
-      continue;
-    sum += (full - rot).norm();
-    ++n;
+  for (int c = 0; c < m_rig.size(); ++c) {
+    const Sophus::SE3d T = m_rig.T_c_b[c] * T_f_ref * m_rig.T_c_b[c].inverse();
+    const Camera& cam = m_rig.cameras[c];
+    const auto& pts = m_reference[c].points(0);
+    for (size_t i = 0; i < pts.size(); i += 4) {
+      const Eigen::Vector3d r = T.so3() * pts[i].bearing;
+      if (!cam.project(Eigen::Vector3d(r + pts[i].rho * T.translation()), full) || !cam.project(r, rot)) continue;
+      sum += (full - rot).norm();
+      ++n;
+    }
   }
   return n > 0 ? sum / n : 0.0;
 }
 
 bool Odometry::needKeyframe(const TrackingResult& res) const {
-  const double brightness = std::abs(res.affine.a - m_window.frame(m_referenceId).params.affine.a);
+  double brightness = 0;
+  const auto& ref = m_window.frame(m_referenceId).params.affine;
+  for (int c = 0; c < m_rig.size(); ++c) brightness = std::max(brightness, std::abs(res.affine[c].a - ref[c].a));
   const double score = res.meanFlow / m_settings.kfFlow + translationFlow(res.T_t_h) / m_settings.kfTranslationFlow +
                        brightness / m_settings.kfBrightness;
   return score > 1.0 || (m_referenceRmse > 0 && res.rmse > m_settings.kfRmseFactor * m_referenceRmse);
 }
 
 void Odometry::storeKeyframePoses() {
-  for (const auto& f : m_window.frames()) m_keyframePoses[f.id] = f.params.T_c_w;
+  for (const auto& f : m_window.frames()) m_keyframePoses[f.id] = f.params.T_b_w;
 }
 
 std::vector<std::optional<Sophus::SE3d>> Odometry::poses() const {
   std::map<int, Sophus::SE3d> current = m_keyframePoses;
-  for (const auto& f : m_window.frames()) current[f.id] = f.params.T_c_w;
+  for (const auto& f : m_window.frames()) current[f.id] = f.params.T_b_w;
   std::vector<std::optional<Sophus::SE3d>> out;
   for (const auto& r : m_frames)
     out.push_back(r.keyframe < 0 ? std::nullopt : std::optional((r.T_f_kf * current.at(r.keyframe)).inverse()));
@@ -400,14 +462,8 @@ std::vector<std::optional<Sophus::SE3d>> Odometry::poses() const {
 
 std::vector<MapPoint> Odometry::mapPoints() const {
   std::vector<MapPoint> out = m_marginalizedPoints;
-  for (const auto& p : m_window.points()) {
-    if (p.numGood() == 0 || p.rho <= kMinMapRho) continue;
-    const WindowFrame& f = m_window.frame(p.host);
-    const ImageLevel& img = f.image->level(0);
-    out.push_back({f.params.T_c_w.inverse() * (p.bearing / p.rho),
-                   img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()), static_cast<float>(p.pattern.uv.y())),
-                   m_keyframeFrameIndex.at(p.host), p.pattern.uv, 1.0 / p.rho});
-  }
+  for (const auto& p : m_window.points())
+    if (p.numGood() > 0 && p.rho > kMinMapRho) out.push_back(mapPoint(p));
   return out;
 }
 

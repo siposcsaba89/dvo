@@ -132,8 +132,13 @@ int main(int argc, char** argv) {
     if (rightInput) right.emplace(std::move(rightInput), start, stride);
     auto frameIndex = [&](size_t i) { return start + i * stride; };
 
-    sdv::Odometry vo(camera, settings);
-    if (stereo) vo.enableStereo(camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)));
+    sdv::Rig rig = sdv::Rig::mono(camera);
+    if (stereo) {
+      // KITTI: the body frame is the left camera frame, so poses stay camera-0 poses for the ground truth.
+      rig.cameras.push_back(camera);
+      rig.T_c_b.push_back(Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)));
+    }
+    sdv::Odometry vo(rig, settings);
 
     using Clock = std::chrono::steady_clock;
     double totalMs = 0, maxMs = 0, waitMs = 0;
@@ -161,7 +166,8 @@ int main(int argc, char** argv) {
         if (maxFrames == 0 || n + 1 < maxFrames) pending = std::async(std::launch::async, readFrame);
         const auto t0 = Clock::now();
         waitMs += std::chrono::duration<double, std::milli>(t0 - tIn).count();
-        const sdv::OdometryFrameInfo info = vo.addFrame(frame.image, frame.right);
+        const sdv::OdometryFrameInfo info =
+            vo.addFrame(frame.right.empty() ? std::vector{frame.image} : std::vector{frame.image, frame.right});
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
         totalMs += ms;
         maxMs = std::max(maxMs, ms);

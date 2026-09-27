@@ -8,6 +8,7 @@
 #include <sdv/camera.h>
 #include <sdv/image_pyramid.h>
 #include <sdv/photometric.h>
+#include <sdv/rig.h>
 
 namespace sdv {
 
@@ -53,8 +54,8 @@ class ReferenceFrame {
 
 struct TrackingResult {
   bool ok = false;
-  Sophus::SE3d T_t_h;
-  AffineBrightness affine;
+  Sophus::SE3d T_t_h;  // body motion from the reference keyframe
+  std::vector<AffineBrightness> affine;  // per camera
   double rmse = 0;
   double inlierRatio = 0;
   double visibleRatio = 0;
@@ -62,22 +63,26 @@ struct TrackingResult {
   int hypothesis = -1;
 };
 
+// Direct alignment of a new rig frame against the reference keyframe: body motion and per-camera brightness.
 class FrameTracker {
  public:
   explicit FrameTracker(TrackingSettings settings) : m_settings(std::move(settings)) {}
 
+  // One reference and one target pyramid per rig camera; a point is aligned within its own camera.
+  TrackingResult track(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                       const std::vector<const ImagePyramid*>& targets, const std::vector<Sophus::SE3d>& hypotheses,
+                       const std::vector<AffineBrightness>& initialAffine) const;
   TrackingResult track(const ReferenceFrame& ref, const ImagePyramid& target,
-                       const std::vector<Sophus::SE3d>& hypotheses, const AffineBrightness& initialAffine,
-                       double exposureRatio = 1.0) const;
+                       const std::vector<Sophus::SE3d>& hypotheses, const AffineBrightness& initialAffine) const;
 
  private:
   struct State {
     Sophus::SE3d T_t_h;
-    AffineBrightness affine;
+    std::vector<AffineBrightness> affine;
   };
   struct System {
-    Eigen::Matrix<double, 8, 8> H;
-    Eigen::Matrix<double, 8, 1> g;
+    Eigen::MatrixXd H;
+    Eigen::VectorXd g;
     double energy = 0;
     int numInliers = 0;
     int numVisible = 0;
@@ -86,12 +91,23 @@ class FrameTracker {
     double normalizedEnergy() const { return numVisible > 0 ? energy / numVisible : 1e30; }
     double inlierRatio() const { return numVisible > 0 ? double(numInliers) / numVisible : 0.0; }
   };
+  struct CameraSystem {
+    Eigen::Matrix<double, 8, 8> H;  // camera-frame pose increment, then (a, b)
+    Eigen::Matrix<double, 8, 1> g;
+    double energy = 0;
+    int numInliers = 0, numVisible = 0, numPoints = 0;
+  };
 
-  System linearize(const ReferenceFrame& ref, const ImageLevel& img, int level, const State& state,
-                   double cutoff, double exposureRatio, bool withJacobians) const;
-  System optimizeLevel(const ReferenceFrame& ref, const ImageLevel& img, int level, State& state,
-                       double cutoff, double exposureRatio, int maxIterations) const;
-  double meanFlow(const ReferenceFrame& ref, const State& state) const;
+  CameraSystem linearizeCamera(const ReferenceFrame& ref, const ImageLevel& img, int level,
+                               const Sophus::SE3d& T_t_h, const AffineBrightness& affine, double cutoff,
+                               bool withJacobians) const;
+  System linearize(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                   const std::vector<const ImagePyramid*>& targets, int level, const State& state, double cutoff,
+                   bool withJacobians) const;
+  System optimizeLevel(const Rig& rig, const std::vector<ReferenceFrame>& refs,
+                       const std::vector<const ImagePyramid*>& targets, int level, State& state, double cutoff,
+                       int maxIterations) const;
+  double meanFlow(const Rig& rig, const std::vector<ReferenceFrame>& refs, const State& state) const;
 
   TrackingSettings m_settings;
 };

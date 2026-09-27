@@ -66,9 +66,8 @@ TEST_P(OdometryTest, StereoIsMetric) {
   settings.targetActivePoints = 800;
   settings.kfFlow = 20.0;
   settings.kfTranslationFlow = 8.0;
-  sdv::Odometry vo(cam, settings);
   const Sophus::SE3d T_r_l(Sophus::SO3d(), Eigen::Vector3d(-0.3, 0, 0));
-  vo.enableStereo(cam, T_r_l);
+  sdv::Odometry vo(sdv::Rig{{cam, cam}, {Sophus::SE3d(), T_r_l}}, settings);
 
   const Sophus::Vector6d v = (Sophus::Vector6d() << -0.06, 0.01, -0.03, 0.001, 0.004, 0.0).finished();
   std::vector<Sophus::SE3d> truth;  // T_w_c
@@ -80,7 +79,7 @@ TEST_P(OdometryTest, StereoIsMetric) {
   for (int k = 0; k < 20; ++k) {
     const Sophus::SE3d T_c_w = Sophus::SE3d::exp(k * v);
     truth.push_back(T_c_w.inverse());
-    vo.addFrame(render(T_c_w), render(T_r_l * T_c_w));
+    vo.addFrame(std::vector<cv::Mat>{render(T_c_w), render(T_r_l * T_c_w)});
   }
   const auto poses = vo.poses();
   ASSERT_TRUE(poses.front().has_value());  // stereo initialises on the first frame

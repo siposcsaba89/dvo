@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
         T_vel = res.T_t_h * T_prev_h.inverse();
         T_prev_h = res.T_t_h;
         state.T_t_h = res.T_t_h;
-        state.target = res.affine;
+        state.target = res.affine[0];
         spdlog::debug("tracked vs gt: {:.3f} m", (res.T_t_h * T_gt.inverse()).translation().norm());
       }
       std::map<sdv::TraceStatus, int> status;

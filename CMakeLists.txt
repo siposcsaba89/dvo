@@ -37,6 +37,7 @@ add_library(sdv STATIC
   src/sdv/point_selector.h
   src/sdv/point_selector.cpp
   src/sdv/profiler.h
+  src/sdv/rig.h
   src/sdv/stereo_depth.h
   src/sdv/stereo_depth.cpp
   src/sdv/tracker.h
