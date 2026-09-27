@@ -29,7 +29,9 @@
 #include <sdv/io/kitti.h>
 #include <sdv/io/ply.h>
 #include <sdv/io/rig_config.h>
+#include <sdv/loop_detector.h>
 #include <sdv/odometry.h>
+#include <sdv/pose_graph.h>
 #include <sdv/semi_dense_mapper.h>
 #include <sdv/undistort.h>
 
@@ -37,7 +39,7 @@ namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
   std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, jsonFile, pngFile,
-      colmapDir, keyframesFile;
+      colmapDir, keyframesFile, loopVocabulary, loopsFile;
   std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
   double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, scale = 1.0, maxDepthSigma = 0.0,
@@ -104,6 +106,9 @@ int main(int argc, char** argv) {
        "also map converged candidates that were never activated")
       ("candidate-interval", po::value(&settings.candidateMaxInterval)->default_value(settings.candidateMaxInterval),
        "largest relative inverse-depth half interval of mapped candidates")
+      ("loop-vocabulary", po::value(&loopVocabulary),
+       "loop closure with this FBoW vocabulary: loop detection, pose graph, corrected frames and points (metric only)")
+      ("loops-out", po::value(&loopsFile), "write the accepted loops (text)")
       ("keyframes-out", po::value(&keyframesFile),
        "write keyframe records (ORB features with map depth per camera, poses, rig) for place recognition")
       ("features", po::value(&settings.features.featuresPerImage)->default_value(settings.features.featuresPerImage),
@@ -147,7 +152,7 @@ int main(int argc, char** argv) {
   }
   if (verbose || trace) spdlog::set_level(trace ? spdlog::level::trace : spdlog::level::debug);
   settings.checkCalibration = checkCalibration;
-  settings.extractFeatures = !keyframesFile.empty();
+  settings.extractFeatures = !keyframesFile.empty() || !loopVocabulary.empty();
 
   try {
     if (!sequenceDir.empty() + !videoFile.empty() + !imageDir.empty() + !rigFile.empty() != 1)
@@ -263,10 +268,61 @@ int main(int argc, char** argv) {
     for (const auto& [stage, e] : vo.profile().entries())
       spdlog::info("  {:<18} {:6.1f} ms/frame  {:7.1f} ms/call  {:5} calls", stage, e.ms / n, e.ms / e.calls, e.calls);
 
-    const auto poses = vo.poses();
+    auto poses = vo.poses();
+    const auto allGt = gtFile.empty() ? std::vector<Sophus::SE3d>{} : sdv::loadKittiPoses(gtFile);
+    sdv::PoseCorrection correction;
+    if (!loopVocabulary.empty() && !multiCamera) {
+      spdlog::warn("loop closure needs metric scale (stereo or a rig); skipped");
+    } else if (!loopVocabulary.empty()) {
+      auto ateOf = [&](const std::vector<std::optional<Sophus::SE3d>>& ps) {
+        std::vector<Sophus::SE3d> e, g;
+        for (size_t i = 0; i < ps.size(); ++i)
+          if (ps[i] && frameIndex(i) < allGt.size()) e.push_back(*ps[i]), g.push_back(allGt[frameIndex(i)]);
+        return e.size() > 2 ? sdv::absoluteTrajectoryError(g, e, false).rmse : 0.0;
+      };
+      const auto records = vo.keyframeRecords();
+      sdv::LoopSettings loopSettings;
+      // KITTI: the body frame is the left camera (y down); rigs: vehicle frame (z up).
+      loopSettings.up = rigFile.empty() ? Eigen::Vector3d(0, -1, 0) : Eigen::Vector3d::UnitZ();
+      sdv::LoopDetector detector(rig, std::make_shared<const sdv::Vocabulary>(loopVocabulary), loopSettings);
+      std::vector<sdv::LoopConstraint> found;
+      for (const auto& r : records) {
+        const auto l = detector.addKeyframe(r);
+        found.insert(found.end(), l.begin(), l.end());
+      }
+      const auto loops = detector.temporallyConsistent(found);
+      std::vector<int> kfFrames;
+      std::vector<Sophus::SE3d> before;
+      for (const auto& r : records) {
+        kfFrames.push_back(r.frameIndex);
+        before.push_back(poses.at(r.frameIndex).value_or(r.T_w_b));
+      }
+      const auto graph = sdv::optimizePoseGraph(before, loops);
+      correction = sdv::PoseCorrection(kfFrames, before, graph.T_w_b);
+      const auto uncorrected = poses;
+      double maxShift = 0;
+      for (size_t i = 0; i < poses.size(); ++i)
+        if (poses[i]) {
+          const Sophus::SE3d corrected = correction.at(static_cast<int>(i)) * *poses[i];
+          maxShift = std::max(maxShift, (corrected.translation() - poses[i]->translation()).norm());
+          poses[i] = corrected;
+        }
+      spdlog::info("loop closure: {} keyframes, {} loops ({} geometric), {} rejected by the pose graph; cost {:.1f} -> "
+                   "{:.1f} in {} iterations, largest pose shift {:.2f} m",
+                   records.size(), loops.size(), found.size(), graph.loopsRejected, graph.initialCost,
+                   graph.finalCost, graph.iterations, maxShift);
+      if (!allGt.empty())
+        spdlog::info("loop closure: ATE SE3 {:.3f} m -> {:.3f} m", ateOf(uncorrected), ateOf(poses));
+      if (!loopsFile.empty()) {
+        std::ofstream out(loopsFile);
+        out << "# query_frame match_frame inliers rmse_px score\n";
+        for (const auto& l : loops)
+          out << fmt::format("{} {} {} {:.3f} {:.3f}\n", frameIndex(records[l.query].frameIndex),
+                             frameIndex(records[l.match].frameIndex), l.inliers, l.rmsePixels, l.score);
+      }
+    }
     std::vector<Sophus::SE3d> est, gt;
     std::vector<int> estFrame;  // input frame (0-based within the run) of each estimate
-    const auto allGt = gtFile.empty() ? std::vector<Sophus::SE3d>{} : sdv::loadKittiPoses(gtFile);
     for (size_t i = 0; i < poses.size(); ++i) {
       if (!poses[i] || (!allGt.empty() && frameIndex(i) >= allGt.size())) continue;
       est.push_back(*poses[i]);
@@ -354,6 +410,8 @@ int main(int argc, char** argv) {
 
     // A few points close to infinity would dominate any viewer; limit by distance from their host camera.
     std::vector<sdv::MapPoint> mapPoints = vo.mapPoints();
+    if (!correction.empty())
+      for (auto& p : mapPoints) p.position = correction.at(p.frameIndex) * p.position;
     if (densify) {
       const double s = denseScale > 0 ? denseScale : scale;
       sdv::Rig denseRig;

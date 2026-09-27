@@ -218,3 +218,21 @@ KITTI: the estimated vertical offset of revisits is ~0 (same road), while the GP
 along lap 2 from 0.02 m / 0.3 deg to 0.75 m / 1.6 deg, no outlier. Stress test (12 inliers, score 0.1, 5 candidates):
 KITTI one bad loop (3.2 m, 18 inliers), removed by the temporal check; garage 10 candidates rejected by the odometry
 check. Not yet tested: multi-storey data (needs a recording).
+
+## Step 16 log
+
+SE3 pose graph (Ceres, Sophus SE3 manifold, Eigen sparse Cholesky) over the keyframes: consecutive odometry edges
+(sigma 5 mm + 1 % of the distance, 0.02 deg + 0.005 deg/m) and the accepted loops (5 cm, 0.2 deg), first keyframe
+fixed. Loops enter without a robust loss: they are verified already, and a Cauchy loss cannot close a loop that
+starts 15-60 sigma away (it simply ignores it). After each solve the worst loop is removed if it exceeds 5 sigma and
+3x the median loop residual, then the graph is solved again (a fixed sigma threshold alone would reject true loops
+whenever the drift model is off). Frames get the correction of their keyframes (interpolated in between), map points
+that of their host frame.
+
+`close_loops` works from exported data only (keyframe records + run_vo poses), so loop closure is tuned without
+rerunning odometry; `run_vo --loop-vocabulary` does the same inside a run (before densify and export).
+
+| Data | Loops | Rejected | Runtime | Result |
+|------|-------|----------|---------|--------|
+| KITTI 00 stereo | 1302 | 1 | 56 s | ATE SE3 3.95 -> 0.89 m, max 8.24 -> 2.43 m |
+| Garage, F/L/B, both laps | 89 | 0 | 2.6 s | cost 4914 -> 55, largest pose shift 0.88 m |

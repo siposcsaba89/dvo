@@ -41,6 +41,8 @@ add_library(sdv STATIC
   src/sdv/semi_dense_mapper.h
   src/sdv/semi_dense_mapper.cpp
   src/sdv/parallel.h
+  src/sdv/pose_graph.h
+  src/sdv/pose_graph.cpp
   src/sdv/place_database.h
   src/sdv/place_database.cpp
   src/sdv/photometric.h
@@ -121,6 +123,9 @@ target_link_libraries(place_recall PRIVATE sdv Boost::program_options)
 add_executable(detect_loops apps/detect_loops.cpp)
 target_link_libraries(detect_loops PRIVATE sdv Boost::program_options)
 
+add_executable(close_loops apps/close_loops.cpp)
+target_link_libraries(close_loops PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
@@ -130,6 +135,7 @@ add_executable(sdv_tests
   tests/test_immature_point.cpp
   tests/test_keyframe_features.cpp
   tests/test_loop_detector.cpp
+  tests/test_pose_graph.cpp
   tests/test_place_database.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp
