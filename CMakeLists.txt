@@ -88,6 +88,12 @@ target_link_libraries(window_stereo PRIVATE sdv Boost::program_options)
 add_executable(video_frames apps/video_frames.cpp)
 target_link_libraries(video_frames PRIVATE sdv Boost::program_options)
 
+add_executable(rig_from_sensorconfig apps/rig_from_sensorconfig.cpp)
+target_link_libraries(rig_from_sensorconfig PRIVATE sdv Boost::program_options)
+
+add_executable(estimate_sync apps/estimate_sync.cpp)
+target_link_libraries(estimate_sync PRIVATE sdv Boost::program_options)
+
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
 

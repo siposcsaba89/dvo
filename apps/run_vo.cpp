@@ -311,16 +311,41 @@ int main(int argc, char** argv) {
                    gt.empty() ? ", unscaled units" : "");
     }
 
+    // Point colours (RGB) from the host camera's input image at the tracked pixel; grey where there is no colour.
+    std::vector<std::array<std::uint8_t, 3>> pointColors(mapPoints.size());
+    for (size_t i = 0; i < mapPoints.size(); ++i)
+      pointColors[i].fill(static_cast<std::uint8_t>(std::clamp(mapPoints[i].intensity, 0.f, 255.f)));
+    if (!plyFile.empty() || !colmapDir.empty()) {
+      std::map<std::pair<int, int>, std::vector<size_t>> pointsOfImage;  // (frame, camera)
+      for (size_t i = 0; i < mapPoints.size(); ++i) pointsOfImage[{mapPoints[i].frameIndex, mapPoints[i].camera}].push_back(i);
+      for (auto& in : inputs) in.source->rewind();
+      const int lastFrame = pointsOfImage.empty() ? -1 : pointsOfImage.rbegin()->first.first;
+      for (int frame = 0; frame <= lastFrame; ++frame) {
+        bool ended = false;
+        for (int c = 0; c < rig.size() && !ended; ++c) {
+          const cv::Mat input = inputs[c].source->next();
+          if (input.empty()) ended = true;
+          const auto it = pointsOfImage.find({frame, c});
+          if (ended || it == pointsOfImage.end() || input.channels() != 3) continue;
+          cv::Mat img = sdv::prepareImage(input, scale, inputs[c].camera);
+          if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
+          for (size_t i : it->second) {
+            const cv::Vec3b bgr = img.at<cv::Vec3b>(static_cast<int>(std::lround(mapPoints[i].uv.y())),
+                                                    static_cast<int>(std::lround(mapPoints[i].uv.x())));
+            pointColors[i] = {bgr[2], bgr[1], bgr[0]};
+          }
+        }
+        if (ended) break;
+      }
+    }
+
     if (!plyFile.empty()) {
       sdv::PlyScene scene;
       std::vector<Sophus::SE3d> aligned = est;
       for (auto& p : aligned) p = alignment.applyToPose(p);
       scene.addTrajectory(aligned, {220, 0, 0});
       if (!gt.empty()) scene.addTrajectory(gt, {0, 200, 0});
-      for (const auto& p : mapPoints) {
-        const auto v = static_cast<uint8_t>(std::clamp(p.intensity, 0.f, 255.f));
-        scene.addPoint(alignment.apply(p.position), {v, v, v});
-      }
+      for (size_t i = 0; i < mapPoints.size(); ++i) scene.addPoint(alignment.apply(mapPoints[i].position), pointColors[i]);
       scene.write(plyFile);
       spdlog::info("wrote {} ({} map points)", plyFile, mapPoints.size());
     }
@@ -394,9 +419,6 @@ int main(int argc, char** argv) {
       const auto keyframeIndices = vo.keyframeIndices();
       std::vector<sdv::ColmapImage> images;
       std::map<std::pair<int, int>, size_t> imageOf;  // (frame, camera)
-      // Point colours from the host camera's input image (before undistortion, at the tracked pixel).
-      std::map<std::pair<int, int>, cv::Mat> hostImages;
-      for (const auto& m : mapPoints) hostImages[{m.frameIndex, m.camera}];
       for (auto& in : inputs) in.source->rewind();
       for (size_t i = 0; i < poses.size(); ++i) {
         const int frame = static_cast<int>(i);
@@ -410,14 +432,11 @@ int main(int argc, char** argv) {
             ended = true;
             break;
           }
-          const bool host = hostImages.contains({frame, c});
-          if (!host && !exported) continue;
+          if (!exported) continue;
           cv::Mat img = sdv::prepareImage(input, scale, inputs[c].camera);
           // GS trainers expect 3-channel images.
           if (img.channels() == 1) cv::cvtColor(img, img, cv::COLOR_GRAY2BGR);
           if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
-          if (host) hostImages[{frame, c}] = img;
-          if (!exported) continue;
           const ExportCamera& e = exportCams[c];
           const std::string name = e.prefix + fmt::format("{:06d}.png", frameIndex(i));
           cv::imwrite((root / "images" / name).string(),
@@ -431,15 +450,10 @@ int main(int argc, char** argv) {
       }
 
       std::vector<sdv::ColmapPoint> points;
-      for (const auto& m : mapPoints) {
+      for (size_t i = 0; i < mapPoints.size(); ++i) {
+        const sdv::MapPoint& m = mapPoints[i];
         const Eigen::Vector3d X = exportAlignment.apply(m.position);
-        std::array<std::uint8_t, 3> rgb;
-        rgb.fill(static_cast<std::uint8_t>(std::clamp(m.intensity, 0.f, 255.f)));
-        if (const cv::Mat& h = hostImages[{m.frameIndex, m.camera}]; !h.empty()) {
-          const cv::Vec3b bgr = h.at<cv::Vec3b>(static_cast<int>(std::lround(m.uv.y())), static_cast<int>(std::lround(m.uv.x())));
-          rgb = {bgr[2], bgr[1], bgr[0]};
-        }
-        sdv::ColmapPoint p{static_cast<std::int64_t>(points.size()) + 1, X, rgb};
+        sdv::ColmapPoint p{static_cast<std::int64_t>(points.size()) + 1, X, pointColors[i]};
         if (const auto it = imageOf.find({m.frameIndex, m.camera}); it != imageOf.end()) {
           sdv::ColmapImage& img = images[it->second];
           const sdv::Camera& exportCam = exportCams[m.camera].camera;

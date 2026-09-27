@@ -143,3 +143,10 @@ keyframe, so a surface seen by two cameras is hosted once (no ghost copies from 
 
 Open: cross-camera tracing of immature points (candidates are traced only in their own camera over time), real rig
 data (extrinsics, synchronisation), dynamic-object masks, SIMD for the larger residual counts.
+
+aiMotive Prodigy recording (e:/records/aimrec), four surround fisheyes (F/B_FISHEYE_C, M_FISHEYE_L/R, 1936x1220
+EUCM, run at half resolution): `rig_from_sensorconfig` writes the rig from sensorconfig.yaml (streams by device
+id, obstruction masks); `estimate_sync` found M_FISHEYE_L one frame late (fast body-frame angular velocity of
+single-camera runs, cross-correlated). 1885 frames (75 s, 155 m, underground garage): all frames posed from the
+first one, no weak tracking, 77 ms/frame, 195k coloured points; height stays within 0.2 m. Static vs temporal depth
+bias +-0.06 % across the image radius: the sensorconfig calibration is consistent.
