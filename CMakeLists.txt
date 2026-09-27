@@ -41,10 +41,14 @@ add_library(sdv STATIC
   src/sdv/semi_dense_mapper.h
   src/sdv/semi_dense_mapper.cpp
   src/sdv/parallel.h
+  src/sdv/global_ba.h
+  src/sdv/global_ba.cpp
   src/sdv/pose_graph.h
   src/sdv/pose_graph.cpp
   src/sdv/place_database.h
   src/sdv/place_database.cpp
+  src/sdv/photometric_ba.h
+  src/sdv/photometric_ba.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_selector.h
@@ -136,6 +140,8 @@ add_executable(sdv_tests
   tests/test_keyframe_features.cpp
   tests/test_loop_detector.cpp
   tests/test_pose_graph.cpp
+  tests/test_global_ba.cpp
+  tests/test_photometric_ba.cpp
   tests/test_place_database.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp

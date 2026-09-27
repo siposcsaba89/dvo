@@ -6,7 +6,14 @@
 
 #include <sdv/loop_detector.h>
 
+namespace ceres {
+class CostFunction;
+}
+
 namespace sdv {
+
+// Relative pose residual between two T_w_b parameter blocks (Sophus SE3 layout), weighted by the sigmas.
+ceres::CostFunction* relativePoseCost(const Sophus::SE3d& T_a_b, double sigmaT, double sigmaRDeg);
 
 struct PoseGraphSettings {
   // Odometry edge between consecutive keyframes: sigma = base + rate * distance between them.

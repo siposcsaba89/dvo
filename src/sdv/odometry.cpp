@@ -416,7 +416,8 @@ void Odometry::appendCandidatePoints(int keyframeId, std::vector<MapPoint>& out)
 
 KeyframeRecord Odometry::makeRecord(int keyframeId) const {
   const Keyframe& kf = m_keyframes.at(keyframeId);
-  KeyframeRecord rec{kf.frameIndex, m_window.frame(keyframeId).params.T_b_w.inverse(), {}};
+  KeyframeRecord rec{kf.frameIndex, m_window.frame(keyframeId).params.T_b_w.inverse(), {},
+                     m_window.frame(keyframeId).params.affine};
   for (int c = 0; c < m_rig.size(); ++c) {
     const Camera& cam = m_rig.cameras[c];
     CameraFeatures f = extractFeatures(cam, toGray8(kf.images[c]->level(0)), m_settings.features);
@@ -439,6 +440,11 @@ KeyframeRecord Odometry::makeRecord(int keyframeId) const {
           0.5 * (p.rhoMax() - p.rhoMin()) / p.rho() <= m_settings.candidateMaxInterval)
         addPoint(Sophus::SE3d(), p.bearing(), p.rho());
     assignDepth(f, uv, rho, m_settings.features);
+    for (const auto& p : m_window.points())
+      if (p.host == keyframeId && p.hostCam == c && p.numGood() > 0 && p.rho > kMinMapRho) {
+        f.pointUv.push_back(p.pattern.uv.cast<float>());
+        f.pointRho.push_back(static_cast<float>(p.rho));
+      }
     rec.cameras.push_back(std::move(f));
   }
   return rec;

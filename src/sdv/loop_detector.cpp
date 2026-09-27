@@ -30,40 +30,17 @@ Eigen::Vector3d bodyPoint(const Rig& rig, int cam, const Eigen::Vector3f& bearin
 
 std::vector<Correspondence> matchFeatures(const Rig& rig, const KeyframeRecord& q, const KeyframeRecord& m,
                                           const LoopSettings& settings) {
-  const int nc = rig.size();
-  cv::Mat all;
-  std::vector<std::pair<int, int>> source;  // (camera, feature) of each row of `all`
-  for (int c = 0; c < nc; ++c) {
-    const CameraFeatures& f = m.cameras[c];
-    if (f.descriptors.empty()) continue;
-    all.push_back(f.descriptors);
-    for (size_t i = 0; i < f.size(); ++i) source.emplace_back(c, static_cast<int>(i));
-  }
-  if (all.rows < 2) return {};
-  cv::BFMatcher matcher(cv::NORM_HAMMING);
-  // Best query feature per match feature, so that one match feature is used once.
-  std::map<int, std::pair<float, Correspondence>> best;
-  for (int qc = 0; qc < nc; ++qc) {
-    const CameraFeatures& fq = q.cameras[qc];
-    if (fq.descriptors.empty()) continue;
-    std::vector<std::vector<cv::DMatch>> knn;
-    matcher.knnMatch(fq.descriptors, all, knn, 2);
-    for (const auto& k : knn) {
-      if (k.size() < 2 || k[0].distance > settings.maxHamming || k[0].distance > settings.ratio * k[1].distance) continue;
-      const auto [mc, j] = source[k[0].trainIdx];
-      const int i = k[0].queryIdx;
-      const CameraFeatures& fm = m.cameras[mc];
-      Correspondence c{qc, mc, fq.bearings[i].cast<double>(), fm.bearings[j].cast<double>(), fq.rho[i] > 0,
-                       fm.rho[j] > 0, {}, {}};
-      if (c.hasXq) c.Xq = bodyPoint(rig, qc, fq.bearings[i], fq.rho[i]);
-      if (c.hasXm) c.Xm = bodyPoint(rig, mc, fm.bearings[j], fm.rho[j]);
-      if (!c.hasXq && !c.hasXm) continue;
-      auto it = best.find(k[0].trainIdx);
-      if (it == best.end() || k[0].distance < it->second.first) best[k[0].trainIdx] = {k[0].distance, c};
-    }
-  }
   std::vector<Correspondence> out;
-  for (auto& [key, v] : best) out.push_back(v.second);
+  for (const auto& fm : matchKeyframeFeatures(q, m, settings.ratio, settings.maxHamming)) {
+    const CameraFeatures& a = q.cameras[fm.camA];
+    const CameraFeatures& b = m.cameras[fm.camB];
+    Correspondence c{fm.camA, fm.camB, a.bearings[fm.featA].cast<double>(), b.bearings[fm.featB].cast<double>(),
+                     a.rho[fm.featA] > 0, b.rho[fm.featB] > 0, {}, {}};
+    if (!c.hasXq && !c.hasXm) continue;
+    if (c.hasXq) c.Xq = bodyPoint(rig, fm.camA, a.bearings[fm.featA], a.rho[fm.featA]);
+    if (c.hasXm) c.Xm = bodyPoint(rig, fm.camB, b.bearings[fm.featB], b.rho[fm.featB]);
+    out.push_back(c);
+  }
   return out;
 }
 
@@ -124,6 +101,38 @@ Sophus::SE3d refine(const Rig& rig, const std::vector<Correspondence>& corr, con
 }
 
 }  // namespace
+
+std::vector<FeatureMatch> matchKeyframeFeatures(const KeyframeRecord& a, const KeyframeRecord& b, double ratio,
+                                                int maxHamming) {
+  cv::Mat all;
+  std::vector<std::pair<int, int>> source;  // (camera, feature) of each row of `all`
+  for (int c = 0; c < static_cast<int>(b.cameras.size()); ++c) {
+    const CameraFeatures& f = b.cameras[c];
+    if (f.descriptors.empty()) continue;
+    all.push_back(f.descriptors);
+    for (size_t i = 0; i < f.size(); ++i) source.emplace_back(c, static_cast<int>(i));
+  }
+  if (all.rows < 2) return {};
+  cv::BFMatcher matcher(cv::NORM_HAMMING);
+  // Best feature of `a` per feature of `b`, so that each feature of `b` is used once.
+  std::map<int, std::pair<float, FeatureMatch>> best;
+  for (int ca = 0; ca < static_cast<int>(a.cameras.size()); ++ca) {
+    const CameraFeatures& fa = a.cameras[ca];
+    if (fa.descriptors.empty()) continue;
+    std::vector<std::vector<cv::DMatch>> knn;
+    matcher.knnMatch(fa.descriptors, all, knn, 2);
+    for (const auto& k : knn) {
+      if (k.size() < 2 || k[0].distance > maxHamming || k[0].distance > ratio * k[1].distance) continue;
+      const auto [cb, j] = source[k[0].trainIdx];
+      auto it = best.find(k[0].trainIdx);
+      if (it == best.end() || k[0].distance < it->second.first)
+        best[k[0].trainIdx] = {k[0].distance, FeatureMatch{ca, k[0].queryIdx, cb, j}};
+    }
+  }
+  std::vector<FeatureMatch> out;
+  for (const auto& [key, v] : best) out.push_back(v.second);
+  return out;
+}
 
 std::optional<LoopConstraint> verifyLoop(const Rig& rig, const KeyframeRecord& query, const KeyframeRecord& match,
                                          const LoopSettings& settings, LoopStats* stats) {

@@ -13,7 +13,9 @@ namespace sdv {
 
 namespace {
 
-constexpr char kMagic[8] = {'S', 'D', 'V', 'K', 'F', 'R', '0', '1'};
+// Version 02 adds the affine brightness and the hosted map points per camera.
+constexpr char kMagic[8] = {'S', 'D', 'V', 'K', 'F', 'R', '0', '2'};
+constexpr char kMagicV1[8] = {'S', 'D', 'V', 'K', 'F', 'R', '0', '1'};
 
 template <typename T>
 void put(std::ostream& out, const T& v) {
@@ -132,6 +134,11 @@ void saveKeyframeRecords(const std::filesystem::path& file, const Rig& rig, cons
   for (const auto& r : records) {
     put<std::int32_t>(out, r.frameIndex);
     putPose(out, r.T_w_b);
+    for (int c = 0; c < rig.size(); ++c) {
+      const AffineBrightness a = c < static_cast<int>(r.affine.size()) ? r.affine[c] : AffineBrightness{};
+      put(out, a.a);
+      put(out, a.b);
+    }
     for (const auto& f : r.cameras) {
       put<std::int32_t>(out, static_cast<std::int32_t>(f.size()));
       put<std::int32_t>(out, f.descriptors.cols);
@@ -143,6 +150,12 @@ void saveKeyframeRecords(const std::filesystem::path& file, const Rig& rig, cons
         put(out, f.rho[i]);
         out.write(reinterpret_cast<const char*>(f.descriptors.ptr(static_cast<int>(i))), f.descriptors.cols);
       }
+      put<std::int32_t>(out, static_cast<std::int32_t>(f.pointUv.size()));
+      for (size_t i = 0; i < f.pointUv.size(); ++i) {
+        put(out, f.pointUv[i].x());
+        put(out, f.pointUv[i].y());
+        put(out, f.pointRho[i]);
+      }
     }
   }
 }
@@ -152,7 +165,9 @@ std::vector<KeyframeRecord> loadKeyframeRecords(const std::filesystem::path& fil
   if (!in) throw std::runtime_error("cannot read " + file.string());
   char magic[sizeof(kMagic)];
   in.read(magic, sizeof(magic));
-  if (!in || !std::equal(magic, magic + sizeof(magic), kMagic)) throw std::runtime_error(file.string() + ": not a keyframe record file");
+  const bool v1 = in && std::equal(magic, magic + sizeof(magic), kMagicV1);
+  if (!in || (!v1 && !std::equal(magic, magic + sizeof(magic), kMagic)))
+    throw std::runtime_error(file.string() + ": not a keyframe record file");
   const int nc = get<std::int32_t>(in);
   Rig r;
   for (int c = 0; c < nc; ++c) {
@@ -168,6 +183,11 @@ std::vector<KeyframeRecord> loadKeyframeRecords(const std::filesystem::path& fil
   for (auto& rec : records) {
     rec.frameIndex = get<std::int32_t>(in);
     rec.T_w_b = getPose(in);
+    if (!v1)
+      for (int c = 0; c < nc; ++c) {
+        const double a = get<double>(in), b = get<double>(in);
+        rec.affine.push_back({a, b});
+      }
     rec.cameras.resize(nc);
     for (auto& f : rec.cameras) {
       const int count = get<std::int32_t>(in), cols = get<std::int32_t>(in);
@@ -182,6 +202,13 @@ std::vector<KeyframeRecord> loadKeyframeRecords(const std::filesystem::path& fil
         f.bearings.push_back(b);
         f.rho.push_back(get<float>(in));
         in.read(reinterpret_cast<char*>(f.descriptors.ptr(i)), cols);
+      }
+      if (v1) continue;
+      const int points = get<std::int32_t>(in);
+      for (int i = 0; i < points; ++i) {
+        const float u = get<float>(in), v = get<float>(in);
+        f.pointUv.emplace_back(u, v);
+        f.pointRho.push_back(get<float>(in));
       }
     }
   }

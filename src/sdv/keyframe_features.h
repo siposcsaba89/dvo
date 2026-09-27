@@ -9,6 +9,7 @@
 
 #include <sdv/camera.h>
 #include <sdv/image_pyramid.h>
+#include <sdv/photometric.h>
 #include <sdv/rig.h>
 
 namespace sdv {
@@ -27,6 +28,9 @@ struct CameraFeatures {
   std::vector<Eigen::Vector3f> bearings;
   std::vector<float> rho;  // inverse distance from the camera; 0 = unknown
   cv::Mat descriptors;  // CV_8U, one row per keypoint
+  // Odometry map points hosted in this camera image: pixel and final inverse distance (for photometric refinement).
+  std::vector<Eigen::Vector2f> pointUv;
+  std::vector<float> pointRho;
 
   size_t size() const { return keypoints.size(); }
   int numWithDepth() const;
@@ -36,6 +40,7 @@ struct KeyframeRecord {
   int frameIndex;
   Sophus::SE3d T_w_b;
   std::vector<CameraFeatures> cameras;
+  std::vector<AffineBrightness> affine;  // per camera, from the window (empty in version 01 files)
 };
 
 cv::Mat toGray8(const ImageLevel& img);

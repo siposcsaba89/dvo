@@ -32,6 +32,11 @@ Sophus::Vector6d weights(double sigmaT, double sigmaRDeg) {
 
 }  // namespace
 
+ceres::CostFunction* relativePoseCost(const Sophus::SE3d& T_a_b, double sigmaT, double sigmaRDeg) {
+  return new ceres::AutoDiffCostFunction<RelativePoseResidual, 6, 7, 7>(
+      new RelativePoseResidual{T_a_b.inverse(), weights(sigmaT, sigmaRDeg)});
+}
+
 PoseGraphResult optimizePoseGraph(const std::vector<Sophus::SE3d>& odometry_T_w_b,
                                   const std::vector<LoopConstraint>& loops, const PoseGraphSettings& settings) {
   const size_t n = odometry_T_w_b.size();

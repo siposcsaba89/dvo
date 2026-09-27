@@ -50,7 +50,8 @@ class Camera {
 
   template <typename T>
   bool project(const Eigen::Matrix<T, 3, 1>& p, Eigen::Matrix<T, 2, 1>& uv) const {
-    const T d = std::sqrt(T(beta) * (p.x() * p.x() + p.y() * p.y()) + p.z() * p.z());
+    using std::sqrt;  // unqualified, so that ceres::Jet finds its overload
+    const T d = sqrt(T(beta) * (p.x() * p.x() + p.y() * p.y()) + p.z() * p.z());
     const T den = T(alpha) * d + (T(1) - T(alpha)) * p.z();
     if (!(p.z() > -T(validityW()) * d) || den <= T(1e-9)) return false;
     uv.x() = T(fx) * p.x() / den + T(cx);

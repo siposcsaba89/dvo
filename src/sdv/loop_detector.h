@@ -42,6 +42,15 @@ struct LoopConstraint {
   double score;  // normalised BoW score
 };
 
+struct FeatureMatch {
+  int camA, featA, camB, featB;
+};
+
+// ORB matches between two keyframes, every camera of `a` against all cameras of `b` (ratio test, each feature of
+// `b` used once).
+std::vector<FeatureMatch> matchKeyframeFeatures(const KeyframeRecord& a, const KeyframeRecord& b, double ratio,
+                                                int maxHamming);
+
 struct LoopStats {
   long long queries = 0, candidates = 0, fewMatches = 0, fewInliers = 0, inconsistentOdometry = 0, verified = 0;
 };

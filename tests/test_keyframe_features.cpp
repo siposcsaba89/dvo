@@ -58,10 +58,13 @@ TEST(KeyframeFeatures, DepthOnlyFromConsistentNeighbours) {
 TEST(KeyframeFeatures, RecordsRoundTrip) {
   const sdv::Camera cam = sdv::Camera::eucm(140, 141, 160.2, 119.7, 0.6, 1.1, 320, 240);
   const sdv::Rig rig{{cam, cam}, {Sophus::SE3d(), synthetic::room::cameraFromBody(M_PI, {-1, 0, 0.5})}};
-  sdv::KeyframeRecord r{42, Sophus::SE3d::exp((Sophus::Vector6d() << 1, 2, 3, 0.1, 0.2, 0.3).finished()), {}};
+  sdv::KeyframeRecord r{42, Sophus::SE3d::exp((Sophus::Vector6d() << 1, 2, 3, 0.1, 0.2, 0.3).finished()), {},
+                        {{0.1, -2.0}, {-0.05, 3.5}}};
   for (int c = 0; c < 2; ++c) {
     auto f = sdv::extractFeatures(cam, roomImage(cam, rig.T_c_b[c]), sdv::FeatureSettings{});
     if (!f.rho.empty()) f.rho[0] = 0.25f;
+    f.pointUv = {{10.5f, 20.25f}, {100.f, 50.f}};
+    f.pointRho = {0.1f, 0.3f + c};
     r.cameras.push_back(f);
   }
   const auto file = std::filesystem::temp_directory_path() / "sdv_records_test.bin";
@@ -71,6 +74,8 @@ TEST(KeyframeFeatures, RecordsRoundTrip) {
   std::filesystem::remove(file);
   ASSERT_EQ(loaded.size(), 1u);
   EXPECT_EQ(loaded[0].frameIndex, 42);
+  ASSERT_EQ(loaded[0].affine.size(), 2u);
+  EXPECT_EQ(loaded[0].affine[1].b, 3.5);
   EXPECT_LT((loaded[0].T_w_b.log() - r.T_w_b.log()).norm(), 1e-9);
   ASSERT_EQ(loadedRig.size(), 2);
   EXPECT_EQ(loadedRig.cameras[1].fy, 141);
@@ -80,6 +85,8 @@ TEST(KeyframeFeatures, RecordsRoundTrip) {
     const auto& b = loaded[0].cameras[c];
     ASSERT_EQ(a.size(), b.size());
     EXPECT_EQ(cv::norm(a.descriptors, b.descriptors, cv::NORM_HAMMING), 0.0);
+    EXPECT_EQ(a.pointUv, b.pointUv);
+    EXPECT_EQ(a.pointRho, b.pointRho);
     for (size_t i = 0; i < a.size(); ++i) {
       EXPECT_EQ(a.keypoints[i].pt, b.keypoints[i].pt);
       EXPECT_EQ(a.keypoints[i].octave, b.keypoints[i].octave);

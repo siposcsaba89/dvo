@@ -236,3 +236,31 @@ rerunning odometry; `run_vo --loop-vocabulary` does the same inside a run (befor
 |------|-------|----------|---------|--------|
 | KITTI 00 stereo | 1302 | 1 | 56 s | ATE SE3 3.95 -> 0.89 m, max 8.24 -> 2.43 m |
 | Garage, F/L/B, both laps | 89 | 0 | 2.6 s | cost 4914 -> 55, largest pose shift 0.88 m |
+
+## Step 17 log
+
+Both global adjustments work from exported data (`close_loops`, after loop detection and the pose graph); keyframe
+records are now version 02 with the affine brightness and the hosted map points (pixel, inverse distance) per camera,
+so only one odometry export per sequence is needed.
+
+- Feature BA (`--bundle-adjust`): ORB matches between each keyframe and its next 3 and across accepted loops, joined
+  into tracks (union-find, one observation per keyframe camera), gated with the pose-graph poses; poses and points on
+  the angular reprojection error (Huber 1.5 px), map-depth priors, weak odometry edges, outlier rounds.
+- Photometric BA (`--photometric --rig ... | --sequence ...`): every hosted map point gets pattern residuals in the
+  cameras of the 5 keyframes before/after its host and around its loop partners (initial error gate, view angle
+  <= 40 deg), keyframe poses, affine brightness per keyframe camera and inverse depths optimised (Ceres autodiff
+  through bicubic interpolation of 8-bit images, Schur on the depths), weak odometry edges, outlier round. Keyframe
+  images are decoded from the videos (5 s for the garage), no odometry rerun.
+
+| Data | Stage | ATE SE3 | max | rot. drift | notes |
+|------|-------|---------|-----|------------|-------|
+| KITTI 00 | pose graph | 0.893 m | 2.44 m | 0.226 deg/100m | |
+| KITTI 00 | + feature BA | 1.03-1.33 m | 2.45-3.08 m | 0.28-0.31 | depth priors off / on |
+| KITTI 00 | + photometric BA | 1.005 m | 2.35 m | 0.223 | 100 points/image, 4.2M residuals, 20 min |
+| Garage | + photometric BA | - | - | - | 164k points, 819k residuals (55k across laps), 11.4 -> 7.2, 5 min |
+
+Neither BA beats the pose graph on KITTI ATE (whose GPS/INS heights are inconsistent between revisits, see step 15),
+so both stay optional and the pose graph is the default. The photometric BA is too slow with autodiff and couples
+the laps weakly when points are subsampled (0.25 % cross-loop residuals on KITTI). Next: filter points before the BA
+(3+ consistent initial residuals) and after it (residual count, depth sigma from the BA information, neighbours, as
+in run_vo), analytic Jacobians (as in the window BA), denser cross-lap residuals.
