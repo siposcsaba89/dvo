@@ -7,6 +7,7 @@
 
 #include <Eigen/Cholesky>
 
+#include <sdv/parallel.h>
 #include <sdv/point_selector.h>
 
 namespace sdv {
@@ -116,51 +117,71 @@ MonoInitializer::System MonoInitializer::linearize(int level, const ImageLevel& 
   HostTargetState hts;
   hts.T_t_h = state.T_t_h;
   hts.target = state.affine;
-  PatternResidual res;
-  Eigen::Matrix<double, 8, 1> Jx;
-  for (size_t i = 0; i < n; ++i) {
-    const Point& p = pts[i];
-    if (evaluatePatternResidual(p.pattern, rho[i], hts, cam, img, m_settings.photometric, res)) {
-      sys.valid[i] = 1;
-      sys.numResiduals += kPatternSize;
-      sys.numVisible += 1;
-      for (int q = 0; q < kPatternSize; ++q) {
-        const PixelResidual& px = res.pixels[q];
-        const double wg = p.pattern.gradientWeights[q];
-        if (std::abs(px.r) > cutoff) {
-          sys.pointEnergy[i] += wg * cutoffEnergy;
-          continue;
+  struct Partial {
+    Eigen::Matrix<double, 8, 8> Hxx = Eigen::Matrix<double, 8, 8>::Zero();
+    Eigen::Matrix<double, 8, 1> gx = Eigen::Matrix<double, 8, 1>::Zero();
+    int numResiduals = 0, numVisible = 0, numInliers = 0;
+    double visibleEnergy = 0, photometricEnergy = 0, priorEnergy = 0;
+  };
+  std::vector<Partial> partials(kParallelChunks);
+  parallelChunks(n, [&](size_t c, size_t begin, size_t end) {
+    Partial& part = partials[c];
+    PatternResidual res;
+    Eigen::Matrix<double, 8, 1> Jx;
+    for (size_t i = begin; i < end; ++i) {
+      const Point& p = pts[i];
+      if (evaluatePatternResidual(p.pattern, rho[i], hts, cam, img, m_settings.photometric, res)) {
+        sys.valid[i] = 1;
+        part.numResiduals += kPatternSize;
+        part.numVisible += 1;
+        for (int q = 0; q < kPatternSize; ++q) {
+          const PixelResidual& px = res.pixels[q];
+          const double wg = p.pattern.gradientWeights[q];
+          if (std::abs(px.r) > cutoff) {
+            sys.pointEnergy[i] += wg * cutoffEnergy;
+            continue;
+          }
+          ++part.numInliers;
+          sys.pointEnergy[i] += wg * huberEnergy(px.r, k);
+          if (!withJacobians) continue;
+          Jx << px.dPose.transpose(), px.dAffine[2], px.dAffine[3];
+          const double w = px.weight;
+          part.Hxx.noalias() += w * Jx * Jx.transpose();
+          part.gx.noalias() += w * px.r * Jx;
+          sys.Hxr[i].noalias() += w * px.dRho * Jx;
+          sys.Hrr[i] += w * px.dRho * px.dRho;
+          sys.gr[i] += w * px.r * px.dRho;
         }
-        ++sys.numInliers;
-        sys.pointEnergy[i] += wg * huberEnergy(px.r, k);
-        if (!withJacobians) continue;
-        Jx << px.dPose.transpose(), px.dAffine[2], px.dAffine[3];
-        const double w = px.weight;
-        sys.Hxx.noalias() += w * Jx * Jx.transpose();
-        sys.gx.noalias() += w * px.r * Jx;
-        sys.Hxr[i].noalias() += w * px.dRho * Jx;
-        sys.Hrr[i] += w * px.dRho * px.dRho;
-        sys.gr[i] += w * px.r * px.dRho;
+        if (withJacobians) sys.hPhoto[i] = sys.Hrr[i];
+        part.visibleEnergy += sys.pointEnergy[i];
+      } else {
+        sys.pointEnergy[i] = fallbackEnergy[i];
       }
-      if (withJacobians) sys.hPhoto[i] = sys.Hrr[i];
-      sys.visibleEnergy += sys.pointEnergy[i];
-    } else {
-      sys.pointEnergy[i] = fallbackEnergy[i];
-    }
-    sys.photometricEnergy += sys.pointEnergy[i];
+      part.photometricEnergy += sys.pointEnergy[i];
 
-    // Smoothness on the relative difference keeps the prior invariant to the (free) monocular scale.
-    double mean = 0;
-    for (int j : p.neighbours) mean += rho[j];
-    mean = p.neighbours.empty() ? rho[i] : mean / p.neighbours.size();
-    const double rel = (rho[i] - mean) / mean;
-    const double gauge = (rho[i] - m_gaugeRho) / m_gaugeRho;
-    sys.pointPrior[i] = 0.5 * m_settings.smoothWeight * rel * rel + 0.5 * m_settings.gaugeWeight * gauge * gauge;
-    sys.energy += sys.pointPrior[i];
-    if (withJacobians) {
-      sys.Hrr[i] += m_settings.smoothWeight / (mean * mean) + m_settings.gaugeWeight / (m_gaugeRho * m_gaugeRho);
-      sys.gr[i] += m_settings.smoothWeight * rel / mean + m_settings.gaugeWeight * gauge / m_gaugeRho;
+      // Smoothness on the relative difference keeps the prior invariant to the (free) monocular scale.
+      double mean = 0;
+      for (int j : p.neighbours) mean += rho[j];
+      mean = p.neighbours.empty() ? rho[i] : mean / p.neighbours.size();
+      const double rel = (rho[i] - mean) / mean;
+      const double gauge = (rho[i] - m_gaugeRho) / m_gaugeRho;
+      sys.pointPrior[i] = 0.5 * m_settings.smoothWeight * rel * rel + 0.5 * m_settings.gaugeWeight * gauge * gauge;
+      part.priorEnergy += sys.pointPrior[i];
+      if (withJacobians) {
+        sys.Hrr[i] += m_settings.smoothWeight / (mean * mean) + m_settings.gaugeWeight / (m_gaugeRho * m_gaugeRho);
+        sys.gr[i] += m_settings.smoothWeight * rel / mean + m_settings.gaugeWeight * gauge / m_gaugeRho;
+      }
     }
+  });
+  for (const Partial& part : partials) {
+    sys.Hxx += part.Hxx;
+    sys.gx += part.gx;
+    sys.numResiduals += part.numResiduals;
+    sys.numVisible += part.numVisible;
+    sys.numInliers += part.numInliers;
+    sys.visibleEnergy += part.visibleEnergy;
+    sys.photometricEnergy += part.photometricEnergy;
+    sys.energy += part.priorEnergy;
   }
   sys.energy += sys.photometricEnergy;
   return sys;

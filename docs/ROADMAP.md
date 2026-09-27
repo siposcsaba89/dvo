@@ -14,7 +14,7 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 7 | Keyframe + point management (creation, activation, outlier removal, marginalisation strategy) | full pipeline on KITTI 00 |
 | 8 | Export: poses + points in COLMAP text format (cameras/images/points3D) for GS / NeuS | load in a GS trainer |
 | 9 | Stereo extension (metric scale, better for driving) | KITTI ATE in metres |
-| 10 | Performance: multithreading, SIMD | real-time on KITTI |
+| 10 | Performance: multithreading, SIMD (done: multithreading, see log) | real-time on KITTI |
 | 11 | Tuning pass once the full pipeline runs (items below) | KITTI ATE / drift, point accuracy |
 
 Deferred to step 11:
@@ -85,6 +85,36 @@ yaw, constant 0.77 m steps) while the estimate follows the real motion. Median r
 0.03-0.04 deg for keyframe pairs and pairs with a tracked frame alike (mono and stereo), i.e. tracked frames are
 not worse than keyframes and the error is near the ground-truth noise. A tracked-frame refinement was therefore not
 implemented; revisit only with better ground truth (synthetic or survey-grade).
+
+## Step 10 log
+
+Profile first (`tools/profile.sh <tag>`: single process, KITTI 00 frames 1000-1400 mono and stereo, optional
+fisheye video; `run_vo` prints the time per stage). Before: the window BA was 70 % of the time (244 ms per
+keyframe, KITTI makes a keyframe every ~2 frames), and within it the per-point depth safeguard 59 % and the
+linearisation 28 %; the dense Schur complement and solve only 2 %. The cost was residual evaluation, not algebra.
+
+Changes, all deterministic (fixed chunk count for parallel reductions, results identical run to run):
+- Window BA: host/target pair table per pass (rotation matrix, adjoint, brightness scale) instead of per residual;
+  energy-only evaluation (no Jacobians, intensity-only interpolation) for the safeguard, classification and energy;
+  the FEJ second projection only for pairs whose linearisation point differs from the current state; linearisation,
+  Schur complement, safeguard and classification in parallel over points. Marginalisation linearises all hosted
+  points in one pass.
+- Tracker: parallel linearisation, the coarse-level motion hypotheses in parallel. Immature point tracing, mono
+  initialisation and pyramid construction in parallel.
+- Input decoding in a background thread; `--start` / `--stride` skip frames without decoding.
+
+| ms/frame (16 threads) | mono KITTI | stereo KITTI | fisheye 960x608 |
+|-----------------------|------------|--------------|-----------------|
+| before (+ input)      | 154 (+15)  | 222 (+82)    | 64 (+4)         |
+| after (input hidden)  | 23         | 31           | 18              |
+
+Window BA 244 -> 20 ms per keyframe. Benchmark (nine 500-frame segments, alpha -0.03) unchanged: stereo ATE SE3
+0.500 m / 0.78 % / 0.425 deg/100m (before 0.501 / 0.79 / 0.428), mono 0.766 m / 1.11 % / 0.424 (0.995 / 1.28 /
+0.430, within the mono run-to-run spread). aiMotive garage fisheye, all 1886 frames: 90 -> 18 ms/frame, same map.
+
+Remaining per keyframe: BA ~20 ms (linearise 7, Schur 5, safeguard 5); per frame: pyramid 3-5 ms, tracking 3,
+tracing 2-3. Not done: SIMD / float residuals (at most ~2x on the BA, ~4 ms/frame), a separate mapping thread
+(tracking latency only; throughput is already bound by the parallel BA).
 
 Own data (step 11 inputs): `run_vo --video file.h264 --camera cam.yaml --scale 0.5` with an EUCM YAML and an
 obstruction mask (config/camera_example.yaml). aiMotive front fisheye, underground garage, 1886 frames at 960x608:
