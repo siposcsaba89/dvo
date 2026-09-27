@@ -8,6 +8,8 @@
 #include <Eigen/Cholesky>
 #include <spdlog/spdlog.h>
 
+#include <sdv/parallel.h>
+
 namespace sdv {
 
 namespace {
@@ -33,42 +35,83 @@ void schurPoint(const std::vector<Eigen::Matrix<double, kF, 1>>& Hfr, double gr,
 
 }  // namespace
 
+WindowPairState makeWindowPairState(const FrameParams& host, const FrameParams& target, const FrameParams& host0,
+                                    const FrameParams& target0) {
+  WindowPairState s;
+  const Sophus::SE3d T_t_h = target.T_c_w * host.T_c_w.inverse();
+  const Sophus::SE3d T_t_h0 = target0.T_c_w * host0.T_c_w.inverse();
+  s.R = T_t_h.rotationMatrix();
+  s.t = T_t_h.translation();
+  s.R0 = T_t_h0.rotationMatrix();
+  s.t0 = T_t_h0.translation();
+  s.adj0 = T_t_h0.Adj();
+  const double ratio = target.exposure / host.exposure;
+  s.scale = ratio * std::exp(target.affine.a - host.affine.a);
+  s.scale0 = ratio * std::exp(target0.affine.a - host0.affine.a);
+  s.hostB = host.affine.b;
+  s.hostB0 = host0.affine.b;
+  s.targetB = target.affine.b;
+  s.linearizedAtCurrent = T_t_h.params() == T_t_h0.params();
+  return s;
+}
+
 bool evaluateWindowResidual(const PatternPoint& point, double rho, const FrameParams& host,
                             const FrameParams& target, const FrameParams& host0, const FrameParams& target0,
                             const Camera& cam, const ImageLevel& targetImg, const PhotometricSettings& settings,
                             WindowPatternResidual& out) {
-  const Sophus::SE3d T_t_h = target.T_c_w * host.T_c_w.inverse();
-  const Sophus::SE3d T_t_h0 = target0.T_c_w * host0.T_c_w.inverse();
-  const Eigen::Matrix<double, 6, 6> adj = T_t_h0.Adj();
-  const double ratio = target.exposure / host.exposure;
-  const double scale = ratio * std::exp(target.affine.a - host.affine.a);
-  const double scale0 = ratio * std::exp(target0.affine.a - host0.affine.a);
+  return evaluateWindowResidual(point, rho, makeWindowPairState(host, target, host0, target0), cam, targetImg,
+                                settings, out);
+}
 
+bool evaluateWindowResidual(const PatternPoint& point, double rho, const WindowPairState& pair, const Camera& cam,
+                            const ImageLevel& targetImg, const PhotometricSettings& settings,
+                            WindowPatternResidual& out) {
   out.energy = 0;
   for (int k = 0; k < kPatternSize; ++k) {
     Eigen::Vector2d uv, uv0, dUvdRho;
     Eigen::Matrix<double, 2, 6> dUvdPose;
-    if (!projectBearing(point.bearings[k], rho, T_t_h, cam, uv) || !cam.isInside(uv.x(), uv.y(), settings.border) ||
-        !projectBearing(point.bearings[k], rho, T_t_h0, cam, uv0, &dUvdPose, &dUvdRho))
+    if (pair.linearizedAtCurrent) {
+      if (!projectBearing(point.bearings[k], rho, pair.R, pair.t, cam, uv, &dUvdPose, &dUvdRho) ||
+          !cam.isInside(uv.x(), uv.y(), settings.border))
+        return false;
+    } else if (!projectBearing(point.bearings[k], rho, pair.R, pair.t, cam, uv) ||
+               !cam.isInside(uv.x(), uv.y(), settings.border) ||
+               !projectBearing(point.bearings[k], rho, pair.R0, pair.t0, cam, uv0, &dUvdPose, &dUvdRho)) {
       return false;
+    }
 
     const Eigen::Vector3f s = targetImg.interpolate(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
     const Eigen::RowVector2d grad(s[1], s[2]);
-    const double hostCentered = point.intensities[k] - host.affine.b;
-    const double hostCentered0 = point.intensities[k] - host0.affine.b;
+    const double hostCentered = point.intensities[k] - pair.hostB;
+    const double hostCentered0 = point.intensities[k] - pair.hostB0;
 
     WindowPixelResidual& px = out.pixels[k];
-    px.r = (s[0] - target.affine.b) - scale * hostCentered;
+    px.r = (s[0] - pair.targetB) - pair.scale * hostCentered;
     const Eigen::Matrix<double, 1, 6> dRelative = grad * dUvdPose;
     px.dTarget.head<6>() = dRelative;
-    px.dHost.head<6>() = -dRelative * adj;
-    px.dHost[6] = scale0 * hostCentered0;
-    px.dHost[7] = scale0;
-    px.dTarget[6] = -scale0 * hostCentered0;
+    px.dHost.head<6>() = -dRelative * pair.adj0;
+    px.dHost[6] = pair.scale0 * hostCentered0;
+    px.dHost[7] = pair.scale0;
+    px.dTarget[6] = -pair.scale0 * hostCentered0;
     px.dTarget[7] = -1.0;
     px.dRho = grad * dUvdRho;
     px.weight = point.gradientWeights[k] * huberWeight(px.r, settings.huberThreshold);
     out.energy += point.gradientWeights[k] * huberEnergy(px.r, settings.huberThreshold);
+  }
+  return true;
+}
+
+bool windowResidualEnergy(const PatternPoint& point, double rho, const WindowPairState& pair, const Camera& cam,
+                          const ImageLevel& targetImg, const PhotometricSettings& settings, double& energy) {
+  energy = 0;
+  for (int k = 0; k < kPatternSize; ++k) {
+    Eigen::Vector2d uv;
+    if (!projectBearing(point.bearings[k], rho, pair.R, pair.t, cam, uv) || !cam.isInside(uv.x(), uv.y(), settings.border))
+      return false;
+    const double r = (targetImg.interpolateIntensity(static_cast<float>(uv.x()), static_cast<float>(uv.y())) -
+                      pair.targetB) -
+                     pair.scale * (point.intensities[k] - pair.hostB);
+    energy += point.gradientWeights[k] * huberEnergy(r, settings.huberThreshold);
   }
   return true;
 }
@@ -146,14 +189,35 @@ void WindowOptimizer::setFrameStereo(int frameId, std::shared_ptr<const ImagePyr
   f.stereoAffine = stereoAffine;
 }
 
-bool WindowOptimizer::evaluateStereo(const WindowPoint& p, double rho, WindowPatternResidual& out) const {
+WindowOptimizer::Pairs WindowOptimizer::makePairs() const {
+  Pairs pairs;
+  const size_t nf = m_frames.size();
+  pairs.numFrames = nf;
+  pairs.temporal.resize(nf * nf);
+  for (size_t h = 0; h < nf; ++h)
+    for (size_t t = 0; t < nf; ++t)
+      if (h != t)
+        pairs.temporal[h * nf + t] = makeWindowPairState(m_frames[h].params, m_frames[t].params,
+                                                         m_frames[h].linearization, m_frames[t].linearization);
+  if (m_rightCam) {
+    pairs.stereo.resize(nf);
+    // Host at the origin with neutral brightness, so the pattern's raw intensities map through the stereo affine.
+    const FrameParams left{Sophus::SE3d(), {}, 1.0};
+    for (size_t h = 0; h < nf; ++h) {
+      const FrameParams right{m_T_r_l, m_frames[h].stereoAffine, 1.0};
+      pairs.stereo[h] = makeWindowPairState(left, right, left, right);
+    }
+  }
+  return pairs;
+}
+
+bool WindowOptimizer::evaluateStereo(const Pairs& pairs, const WindowPoint& p, double rho,
+                                     WindowPatternResidual& out) const {
   if (!m_rightCam) return false;
-  const WindowFrame& host = m_frames[frameIndex(p.host)];
+  const int h = frameIndex(p.host);
+  const WindowFrame& host = m_frames[h];
   if (!host.right) return false;
-  // Host at the origin with neutral brightness, so the pattern's raw intensities map through the stereo affine.
-  const FrameParams left{Sophus::SE3d(), {}, 1.0};
-  const FrameParams right{m_T_r_l, host.stereoAffine, 1.0};
-  if (!evaluateWindowResidual(p.pattern, rho, left, right, left, right, *m_rightCam, host.right->level(0),
+  if (!evaluateWindowResidual(p.pattern, rho, pairs.stereo[h], *m_rightCam, host.right->level(0),
                               m_settings.photometric, out))
     return false;
   for (auto& px : out.pixels) px.weight *= m_settings.stereoWeight;
@@ -161,92 +225,116 @@ bool WindowOptimizer::evaluateStereo(const WindowPoint& p, double rho, WindowPat
   return true;
 }
 
+bool WindowOptimizer::stereoEnergy(const Pairs& pairs, const WindowPoint& p, double rho, double& energy) const {
+  if (!m_rightCam) return false;
+  const int h = frameIndex(p.host);
+  const WindowFrame& host = m_frames[h];
+  if (!host.right ||
+      !windowResidualEnergy(p.pattern, rho, pairs.stereo[h], *m_rightCam, host.right->level(0),
+                            m_settings.photometric, energy))
+    return false;
+  energy *= m_settings.stereoWeight;
+  return true;
+}
+
 void WindowOptimizer::removePoint(int pointId) {
   std::erase_if(m_points, [&](const WindowPoint& p) { return p.id == pointId; });
 }
 
-WindowOptimizer::System WindowOptimizer::linearize(const std::vector<size_t>& pointIndices) const {
+WindowOptimizer::System WindowOptimizer::linearize(const Pairs& pairs, const std::vector<size_t>& pointIndices) const {
   const size_t nf = m_frames.size();
-  System sys;
-  sys.H = Eigen::MatrixXd::Zero(kF * nf, kF * nf);
-  sys.g = Eigen::VectorXd::Zero(kF * nf);
-
+  const Eigen::Index n = kF * static_cast<Eigen::Index>(nf);
   std::vector<size_t> indices = pointIndices;
   if (indices.empty())
     for (size_t i = 0; i < m_points.size(); ++i) indices.push_back(i);
+  System sys;
   sys.points.resize(indices.size());
 
-  WindowPatternResidual res;
-  for (size_t pi = 0; pi < indices.size(); ++pi) {
-    const WindowPoint& p = m_points[indices[pi]];
-    PointBlock& pb = sys.points[pi];
-    pb.Hfr.assign(nf, Eigen::Matrix<double, kF, 1>::Zero());
-    const int h = frameIndex(p.host);
-    const WindowFrame& hf = m_frames[h];
-    for (const auto& r : p.residuals) {
-      if (r.state != ResidualState::Good) continue;
-      const int t = frameIndex(r.target);
-      const WindowFrame& tf = m_frames[t];
-      if (!evaluateWindowResidual(p.pattern, p.rho, hf.params, tf.params, hf.linearization, tf.linearization,
-                                  m_camera, tf.image->level(0), m_settings.photometric, res))
-        continue;
-      Eigen::Matrix<double, kF, kF> Hhh = Eigen::Matrix<double, kF, kF>::Zero(), Hht = Hhh, Htt = Hhh;
-      Eigen::Matrix<double, kF, 1> gh = Eigen::Matrix<double, kF, 1>::Zero(), gt = gh, hrh = gh, hrt = gh;
-      for (const auto& px : res.pixels) {
-        const Eigen::Matrix<double, kF, 1> Jh = px.dHost.transpose(), Jt = px.dTarget.transpose();
-        Hhh.noalias() += px.weight * Jh * Jh.transpose();
-        Hht.noalias() += px.weight * Jh * Jt.transpose();
-        Htt.noalias() += px.weight * Jt * Jt.transpose();
-        gh.noalias() += px.weight * px.r * Jh;
-        gt.noalias() += px.weight * px.r * Jt;
-        hrh.noalias() += px.weight * px.dRho * Jh;
-        hrt.noalias() += px.weight * px.dRho * Jt;
-        pb.Hrr += px.weight * px.dRho * px.dRho;
-        pb.gr += px.weight * px.r * px.dRho;
+  std::vector<Eigen::MatrixXd> chunkH(kParallelChunks);
+  std::vector<Eigen::VectorXd> chunkG(kParallelChunks);
+  parallelChunks(indices.size(), [&](size_t c, size_t begin, size_t end) {
+    Eigen::MatrixXd& H = chunkH[c] = Eigen::MatrixXd::Zero(n, n);
+    Eigen::VectorXd& g = chunkG[c] = Eigen::VectorXd::Zero(n);
+    WindowPatternResidual res;
+    for (size_t pi = begin; pi < end; ++pi) {
+      const WindowPoint& p = m_points[indices[pi]];
+      PointBlock& pb = sys.points[pi];
+      pb.Hfr.assign(nf, Eigen::Matrix<double, kF, 1>::Zero());
+      const int h = frameIndex(p.host);
+      for (const auto& r : p.residuals) {
+        if (r.state != ResidualState::Good) continue;
+        const int t = frameIndex(r.target);
+        if (!evaluateWindowResidual(p.pattern, p.rho, pairs.at(h, t), m_camera, m_frames[t].image->level(0),
+                                    m_settings.photometric, res))
+          continue;
+        Eigen::Matrix<double, kF, kF> Hhh = Eigen::Matrix<double, kF, kF>::Zero(), Hht = Hhh, Htt = Hhh;
+        Eigen::Matrix<double, kF, 1> gh = Eigen::Matrix<double, kF, 1>::Zero(), gt = gh, hrh = gh, hrt = gh;
+        for (const auto& px : res.pixels) {
+          const Eigen::Matrix<double, kF, 1> Jh = px.dHost.transpose(), Jt = px.dTarget.transpose();
+          Hhh.noalias() += px.weight * Jh * Jh.transpose();
+          Hht.noalias() += px.weight * Jh * Jt.transpose();
+          Htt.noalias() += px.weight * Jt * Jt.transpose();
+          gh.noalias() += px.weight * px.r * Jh;
+          gt.noalias() += px.weight * px.r * Jt;
+          hrh.noalias() += px.weight * px.dRho * Jh;
+          hrt.noalias() += px.weight * px.dRho * Jt;
+          pb.Hrr += px.weight * px.dRho * px.dRho;
+          pb.gr += px.weight * px.r * px.dRho;
+        }
+        H.block<kF, kF>(kF * h, kF * h) += Hhh;
+        H.block<kF, kF>(kF * h, kF * t) += Hht;
+        H.block<kF, kF>(kF * t, kF * h) += Hht.transpose();
+        H.block<kF, kF>(kF * t, kF * t) += Htt;
+        g.segment<kF>(kF * h) += gh;
+        g.segment<kF>(kF * t) += gt;
+        pb.Hfr[h] += hrh;
+        pb.Hfr[t] += hrt;
       }
-      sys.H.block<kF, kF>(kF * h, kF * h) += Hhh;
-      sys.H.block<kF, kF>(kF * h, kF * t) += Hht;
-      sys.H.block<kF, kF>(kF * t, kF * h) += Hht.transpose();
-      sys.H.block<kF, kF>(kF * t, kF * t) += Htt;
-      sys.g.segment<kF>(kF * h) += gh;
-      sys.g.segment<kF>(kF * t) += gt;
-      pb.Hfr[h] += hrh;
-      pb.Hfr[t] += hrt;
+      if (p.stereoState == ResidualState::Good && evaluateStereo(pairs, p, p.rho, res))
+        for (const auto& px : res.pixels) {
+          pb.Hrr += px.weight * px.dRho * px.dRho;
+          pb.gr += px.weight * px.r * px.dRho;
+        }
     }
-    if (p.stereoState == ResidualState::Good && evaluateStereo(p, p.rho, res))
-      for (const auto& px : res.pixels) {
-        pb.Hrr += px.weight * px.dRho * px.dRho;
-        pb.gr += px.weight * px.r * px.dRho;
-      }
+  });
+  sys.H = Eigen::MatrixXd::Zero(n, n);
+  sys.g = Eigen::VectorXd::Zero(n);
+  for (size_t c = 0; c < kParallelChunks; ++c) {
+    sys.H += chunkH[c];
+    sys.g += chunkG[c];
   }
   return sys;
 }
 
 void WindowOptimizer::classifyResiduals() {
-  const double k = m_settings.photometric.huberThreshold;
-  const double thresholdEnergy = huberEnergy(m_settings.outlierThreshold, k);
-  WindowPatternResidual res;
-  for (auto& p : m_points) {
-    const WindowFrame& hf = m_frames[frameIndex(p.host)];
-    double maxEnergy = 0;
-    for (float w : p.pattern.gradientWeights) maxEnergy += w * thresholdEnergy;
-    for (auto& r : p.residuals) {
-      const WindowFrame& tf = m_frames[frameIndex(r.target)];
-      if (!evaluateWindowResidual(p.pattern, p.rho, hf.params, tf.params, hf.params, tf.params, m_camera,
-                                  tf.image->level(0), m_settings.photometric, res)) {
-        r.state = ResidualState::OutOfBounds;
+  const Pairs pairs = makePairs();
+  const double thresholdEnergy = huberEnergy(m_settings.outlierThreshold, m_settings.photometric.huberThreshold);
+  parallelChunks(m_points.size(), [&](size_t, size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      WindowPoint& p = m_points[i];
+      const int h = frameIndex(p.host);
+      double maxEnergy = 0;
+      for (float w : p.pattern.gradientWeights) maxEnergy += w * thresholdEnergy;
+      for (auto& r : p.residuals) {
+        const int t = frameIndex(r.target);
+        double e;
+        if (!windowResidualEnergy(p.pattern, p.rho, pairs.at(h, t), m_camera, m_frames[t].image->level(0),
+                                  m_settings.photometric, e)) {
+          r.state = ResidualState::OutOfBounds;
+          continue;
+        }
+        r.energy = e;
+        r.state = e > maxEnergy ? ResidualState::Outlier : ResidualState::Good;
+      }
+      double e;
+      if (!stereoEnergy(pairs, p, p.rho, e)) {
+        p.stereoState = ResidualState::OutOfBounds;
         continue;
       }
-      r.energy = res.energy;
-      r.state = res.energy > maxEnergy ? ResidualState::Outlier : ResidualState::Good;
+      p.stereoEnergy = e;
+      p.stereoState = e > maxEnergy * m_settings.stereoWeight ? ResidualState::Outlier : ResidualState::Good;
     }
-    if (!evaluateStereo(p, p.rho, res)) {
-      p.stereoState = ResidualState::OutOfBounds;
-      continue;
-    }
-    p.stereoEnergy = res.energy;
-    p.stereoState = res.energy > maxEnergy * m_settings.stereoWeight ? ResidualState::Outlier : ResidualState::Good;
-  }
+  });
 }
 
 double WindowOptimizer::priorEnergy() const {
@@ -274,27 +362,34 @@ void WindowOptimizer::addPriors(System& sys) const {
   sys.g += m_priorH * delta + m_priorB;
 }
 
-double WindowOptimizer::pointEnergy(const WindowPoint& p, double rho) const {
-  double e = 0;
-  WindowPatternResidual res;
-  const WindowFrame& hf = m_frames[frameIndex(p.host)];
+double WindowOptimizer::pointEnergy(const Pairs& pairs, const WindowPoint& p, double rho) const {
+  double sum = 0;
+  const int h = frameIndex(p.host);
   for (const auto& r : p.residuals) {
     if (r.state != ResidualState::Good) continue;
-    const WindowFrame& tf = m_frames[frameIndex(r.target)];
+    const int t = frameIndex(r.target);
     // Leaving the image keeps the classification energy, so it is neither rewarded nor penalised.
-    e += evaluateWindowResidual(p.pattern, rho, hf.params, tf.params, hf.params, tf.params, m_camera,
-                                tf.image->level(0), m_settings.photometric, res)
-             ? res.energy
-             : r.energy;
+    double e;
+    sum += windowResidualEnergy(p.pattern, rho, pairs.at(h, t), m_camera, m_frames[t].image->level(0),
+                                m_settings.photometric, e)
+               ? e
+               : r.energy;
   }
-  if (p.stereoState == ResidualState::Good) e += evaluateStereo(p, rho, res) ? res.energy : p.stereoEnergy;
-  return e;
+  if (p.stereoState == ResidualState::Good) {
+    double e;
+    sum += stereoEnergy(pairs, p, rho, e) ? e : p.stereoEnergy;
+  }
+  return sum;
 }
 
-double WindowOptimizer::energy() const {
-  double e = 0;
-  for (const auto& p : m_points) e += pointEnergy(p, p.rho);
-  return e + priorEnergy();
+double WindowOptimizer::energy(const Pairs& pairs) const {
+  std::vector<double> chunkEnergy(kParallelChunks, 0.0);
+  parallelChunks(m_points.size(), [&](size_t c, size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) chunkEnergy[c] += pointEnergy(pairs, m_points[i], m_points[i].rho);
+  });
+  double e = priorEnergy();
+  for (double c : chunkEnergy) e += c;
+  return e;
 }
 
 WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
@@ -310,7 +405,7 @@ WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
       result.numOutOfBounds += r.state == ResidualState::OutOfBounds;
     }
 
-  double current = energy();
+  double current = energy(makePairs());
   result.initialEnergy = current;
   double lambda = 1e-4;
   std::vector<FrameParams> backupFrames(m_frames.size());
@@ -318,7 +413,7 @@ WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
   for (int it = 0; it < maxIterations; ++it) {
     for (auto& f : m_frames)
       if (!f.inPrior) f.linearization = f.params;
-    System sys = linearize({});
+    System sys = linearize(makePairs(), {});
     addPriors(sys);
     for (size_t i = 0; i < m_points.size(); ++i) m_points[i].hRho = sys.points[i].Hrr;
 
@@ -327,9 +422,19 @@ WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
     A.diagonal().array() += 1e-8;
     Eigen::VectorXd b = sys.g;
     std::vector<double> hr(m_points.size());
-    for (size_t i = 0; i < m_points.size(); ++i) {
-      hr[i] = sys.points[i].Hrr * (1.0 + lambda) + 1e-12;
-      schurPoint(sys.points[i].Hfr, sys.points[i].gr, hr[i], A, b);
+    std::vector<Eigen::MatrixXd> chunkA(kParallelChunks);
+    std::vector<Eigen::VectorXd> chunkB(kParallelChunks);
+    parallelChunks(m_points.size(), [&](size_t c, size_t begin, size_t end) {
+      chunkA[c] = Eigen::MatrixXd::Zero(A.rows(), A.cols());
+      chunkB[c] = Eigen::VectorXd::Zero(b.size());
+      for (size_t i = begin; i < end; ++i) {
+        hr[i] = sys.points[i].Hrr * (1.0 + lambda) + 1e-12;
+        schurPoint(sys.points[i].Hfr, sys.points[i].gr, hr[i], chunkA[c], chunkB[c]);
+      }
+    });
+    for (size_t c = 0; c < kParallelChunks; ++c) {
+      A += chunkA[c];
+      b += chunkB[c];
     }
     const Eigen::VectorXd dx = -A.ldlt().solve(b);
 
@@ -352,24 +457,33 @@ WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
     // its own energy. The photometric error is far from linear in depth; without this about half of the points
     // overshoot in every step and one bad point rejects the whole step, so the window never converges (KITTI 00).
     ++result.iterations;
+    const Pairs pairs = makePairs();
+    std::vector<double> chunkEnergy(kParallelChunks, 0.0);
+    std::vector<int> chunkReverted(kParallelChunks, 0);
+    parallelChunks(m_points.size(), [&](size_t c, size_t begin, size_t end) {
+      for (size_t i = begin; i < end; ++i) {
+        WindowPoint& p = m_points[i];
+        double e = pointEnergy(pairs, p, p.rho);
+        if (const double eOld = pointEnergy(pairs, p, backupRho[i]); eOld < e) {
+          const double half = 0.5 * (p.rho + backupRho[i]);
+          const double eHalf = pointEnergy(pairs, p, half);
+          if (eHalf < eOld) {
+            p.rho = half;
+            e = eHalf;
+          } else {
+            p.rho = backupRho[i];
+            e = eOld;
+            ++chunkReverted[c];
+          }
+        }
+        chunkEnergy[c] += e;
+      }
+    });
     double next = priorEnergy();
     int reverted = 0;
-    for (size_t i = 0; i < m_points.size(); ++i) {
-      WindowPoint& p = m_points[i];
-      double e = pointEnergy(p, p.rho);
-      if (const double eOld = pointEnergy(p, backupRho[i]); eOld < e) {
-        const double half = 0.5 * (p.rho + backupRho[i]);
-        const double eHalf = pointEnergy(p, half);
-        if (eHalf < eOld) {
-          p.rho = half;
-          e = eHalf;
-        } else {
-          p.rho = backupRho[i];
-          e = eOld;
-          ++reverted;
-        }
-      }
-      next += e;
+    for (size_t c = 0; c < kParallelChunks; ++c) {
+      next += chunkEnergy[c];
+      reverted += chunkReverted[c];
     }
     spdlog::trace("window BA iteration {}: lambda {:.1e}, energy {:.1f} -> {:.1f}, {} of {} depth steps reverted", it,
                   lambda, current, next, reverted, m_points.size());
@@ -396,17 +510,24 @@ void WindowOptimizer::marginalizeFrame(int frameId) {
     if (!f.inPrior) f.linearization = f.params;
   classifyResiduals();
 
+  const Pairs pairs = makePairs();
+  std::vector<size_t> hosted;
+  for (size_t i = 0; i < m_points.size(); ++i)
+    if (m_points[i].host == frameId) hosted.push_back(i);
+  // Points with too little depth information are dropped rather than marginalised.
+  std::vector<size_t> kept;
+  if (!hosted.empty()) {
+    const System all = linearize(pairs, hosted);
+    for (size_t j = 0; j < hosted.size(); ++j)
+      if (all.points[j].Hrr >= m_settings.minRhoHessian) kept.push_back(hosted[j]);
+  }
   Eigen::MatrixXd H = Eigen::MatrixXd::Zero(kF * nf, kF * nf);
   Eigen::VectorXd g = Eigen::VectorXd::Zero(kF * nf);
-  for (size_t i = 0; i < m_points.size(); ++i) {
-    if (m_points[i].host != frameId) continue;
-    System sys = linearize({i});
-    const PointBlock& pb = sys.points[0];
-    // Points with too little depth information are dropped rather than marginalised.
-    if (pb.Hrr < m_settings.minRhoHessian) continue;
-    schurPoint(pb.Hfr, pb.gr, pb.Hrr, sys.H, sys.g);
-    H += sys.H;
-    g += sys.g;
+  if (!kept.empty()) {
+    System sys = linearize(pairs, kept);
+    for (const PointBlock& pb : sys.points) schurPoint(pb.Hfr, pb.gr, pb.Hrr, sys.H, sys.g);
+    H = std::move(sys.H);
+    g = std::move(sys.g);
   }
   Eigen::VectorXd delta(kF * nf);
   for (Eigen::Index i = 0; i < nf; ++i) delta.segment<kF>(kF * i) = m_frames[i].delta();
@@ -459,9 +580,15 @@ void WindowOptimizer::logStereoDepthBias() const {
   double sum[3] = {};
   int count[3] = {};
   WindowPatternResidual res;
+  const Pairs pairs = makePairs();
   for (const auto& p : m_points) {
     if (p.stereoState != ResidualState::Good || p.rho <= 0) continue;
-    const auto ls = argminLog([&](double r) { return evaluateStereo(p, r, res) ? res.energy : inf; }, p.rho);
+    const auto ls = argminLog(
+        [&](double r) {
+          double e;
+          return stereoEnergy(pairs, p, r, e) ? e : inf;
+        },
+        p.rho);
     if (!ls) continue;
     const double rhoStereo = p.rho * std::exp(*ls);
     const WindowFrame& hf = m_frames[frameIndex(p.host)];

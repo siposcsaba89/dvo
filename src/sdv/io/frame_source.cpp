@@ -48,7 +48,7 @@ cv::Mat SubsampledSource::next() {
   size_t skip = m_started ? m_stride - 1 : m_start;
   m_started = true;
   for (; skip > 0; --skip)
-    if (m_source->next().empty()) return {};
+    if (!m_source->skip()) return {};
   return m_source->next();
 }
 

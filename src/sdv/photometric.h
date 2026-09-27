@@ -47,6 +47,10 @@ struct HostTargetState {
 bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Sophus::SE3d& T_t_h, const Camera& cam,
                     Eigen::Vector2d& uv, Eigen::Matrix<double, 2, 6>* dUvdPose = nullptr,
                     Eigen::Vector2d* dUvdRho = nullptr);
+// Same with T_t_h as rotation matrix and translation, for many points per pose.
+bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Eigen::Matrix3d& R_t_h,
+                    const Eigen::Vector3d& t_t_h, const Camera& cam, Eigen::Vector2d& uv,
+                    Eigen::Matrix<double, 2, 6>* dUvdPose = nullptr, Eigen::Vector2d* dUvdRho = nullptr);
 
 struct PixelResidual {
   double r = 0;

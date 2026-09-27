@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <iostream>
 #include <limits>
@@ -135,29 +136,50 @@ int main(int argc, char** argv) {
     if (stereo) vo.enableStereo(camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)));
 
     using Clock = std::chrono::steady_clock;
-    double totalMs = 0, maxMs = 0;
+    double totalMs = 0, maxMs = 0, waitMs = 0;
     int keyframes = 0, weak = 0;
     size_t n = 0;
-    for (; maxFrames == 0 || n < maxFrames; ++n) {
+    struct InputFrame {
+      cv::Mat image, right;
+    };
+    // Decoding and resizing the next frame overlaps with processing the current one.
+    auto readFrame = [&] {
+      InputFrame f;
       const cv::Mat input = left.next();
-      if (input.empty()) break;
-      const cv::Mat image = sdv::prepareImage(input, scale, camera);
-      const cv::Mat rightImage = right ? sdv::prepareImage(right->next(), scale, camera) : cv::Mat();
-      const auto t0 = Clock::now();
-      const sdv::OdometryFrameInfo info = vo.addFrame(image, rightImage);
-      const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-      totalMs += ms;
-      maxMs = std::max(maxMs, ms);
-      keyframes += info.keyframe;
-      weak += info.initialized && !info.trackingOk;
-      spdlog::debug("frame {}: {:.0f} ms{}{} rmse {:.2f}, active {}, candidates {}", frameIndex(n), ms,
-                    info.keyframe ? " KF" : "", info.initialized && !info.trackingOk ? " WEAK" : "", info.rmse,
-                    info.activePoints, info.immaturePoints);
-      if (!verbose && n % 100 == 99) spdlog::info("{} frames, {:.0f} ms/frame", n + 1, totalMs / (n + 1));
+      if (input.empty()) return f;
+      f.image = sdv::prepareImage(input, scale, camera);
+      if (right) f.right = sdv::prepareImage(right->next(), scale, camera);
+      return f;
+    };
+    const auto tStart = Clock::now();
+    {
+      std::future<InputFrame> pending = std::async(std::launch::async, readFrame);
+      for (; maxFrames == 0 || n < maxFrames; ++n) {
+        const auto tIn = Clock::now();
+        const InputFrame frame = pending.get();
+        if (frame.image.empty()) break;
+        if (maxFrames == 0 || n + 1 < maxFrames) pending = std::async(std::launch::async, readFrame);
+        const auto t0 = Clock::now();
+        waitMs += std::chrono::duration<double, std::milli>(t0 - tIn).count();
+        const sdv::OdometryFrameInfo info = vo.addFrame(frame.image, frame.right);
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        totalMs += ms;
+        maxMs = std::max(maxMs, ms);
+        keyframes += info.keyframe;
+        weak += info.initialized && !info.trackingOk;
+        spdlog::debug("frame {}: {:.0f} ms{}{} rmse {:.2f}, active {}, candidates {}", frameIndex(n), ms,
+                      info.keyframe ? " KF" : "", info.initialized && !info.trackingOk ? " WEAK" : "", info.rmse,
+                      info.activePoints, info.immaturePoints);
+        if (!verbose && n % 100 == 99) spdlog::info("{} frames, {:.0f} ms/frame", n + 1, totalMs / (n + 1));
+      }
     }
     if (n == 0) throw std::runtime_error("no frames read");
+    const double wallMs = std::chrono::duration<double, std::milli>(Clock::now() - tStart).count();
     spdlog::info("{} frames: {:.0f} ms/frame (max {:.0f}), {} keyframes, {} weak tracking frames", n, totalMs / n,
                  maxMs, keyframes, weak);
+    spdlog::info("wall time {:.1f} ms/frame, of which {:.1f} ms waiting for input", wallMs / n, waitMs / n);
+    for (const auto& [stage, e] : vo.profile().entries())
+      spdlog::info("  {:<18} {:6.1f} ms/frame  {:7.1f} ms/call  {:5} calls", stage, e.ms / n, e.ms / e.calls, e.calls);
 
     const auto poses = vo.poses();
     std::vector<Sophus::SE3d> est, gt;

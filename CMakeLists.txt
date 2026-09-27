@@ -31,10 +31,12 @@ add_library(sdv STATIC
   src/sdv/mono_initializer.cpp
   src/sdv/odometry.h
   src/sdv/odometry.cpp
+  src/sdv/parallel.h
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_selector.h
   src/sdv/point_selector.cpp
+  src/sdv/profiler.h
   src/sdv/stereo_depth.h
   src/sdv/stereo_depth.cpp
   src/sdv/tracker.h

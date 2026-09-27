@@ -4,15 +4,25 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include <sdv/parallel.h>
+
 namespace sdv {
 
 namespace {
+
+template <typename RowBody>
+void parallelRows(int rows, RowBody&& rowBody) {
+  parallelChunks(static_cast<size_t>(rows), [&](size_t, size_t begin, size_t end) {
+    for (size_t v = begin; v < end; ++v) rowBody(static_cast<int>(v));
+  });
+}
 
 void fillGradients(ImageLevel& lvl) {
   const int w = lvl.width, h = lvl.height;
   lvl.gradNormSq.assign(static_cast<size_t>(w) * h, 0.f);
   // Central differences; border pixels keep zero gradient.
-  for (int v = 1; v < h - 1; ++v) {
+  parallelRows(h, [&](int v) {
+    if (v == 0 || v == h - 1) return;
     for (int u = 1; u < w - 1; ++u) {
       const int i = v * w + u;
       const float gu = 0.5f * (lvl.data[i + 1][0] - lvl.data[i - 1][0]);
@@ -21,7 +31,7 @@ void fillGradients(ImageLevel& lvl) {
       lvl.data[i][2] = gv;
       lvl.gradNormSq[i] = gu * gu + gv * gv;
     }
-  }
+  });
 }
 
 }  // namespace
@@ -45,11 +55,11 @@ ImagePyramid::ImagePyramid(const cv::Mat& image, int levels) {
   ImageLevel& base = m_levels[0];
   base.width = image.cols;
   base.height = image.rows;
-  base.data.assign(static_cast<size_t>(base.width) * base.height, Eigen::Vector3f::Zero());
-  for (int v = 0; v < base.height; ++v) {
+  base.data.resize(static_cast<size_t>(base.width) * base.height);
+  parallelRows(base.height, [&](int v) {
     const float* row = image.ptr<float>(v);
-    for (int u = 0; u < base.width; ++u) base.data[v * base.width + u][0] = row[u];
-  }
+    for (int u = 0; u < base.width; ++u) base.data[v * base.width + u] = {row[u], 0.f, 0.f};
+  });
   fillGradients(base);
 
   for (int l = 1; l < levels; ++l) {
@@ -57,15 +67,15 @@ ImagePyramid::ImagePyramid(const cv::Mat& image, int levels) {
     ImageLevel& lvl = m_levels[l];
     lvl.width = fine.width / 2;
     lvl.height = fine.height / 2;
-    lvl.data.assign(static_cast<size_t>(lvl.width) * lvl.height, Eigen::Vector3f::Zero());
-    for (int v = 0; v < lvl.height; ++v) {
+    lvl.data.resize(static_cast<size_t>(lvl.width) * lvl.height);
+    parallelRows(lvl.height, [&](int v) {
       for (int u = 0; u < lvl.width; ++u) {
         const int f = 2 * v * fine.width + 2 * u;
-        lvl.data[v * lvl.width + u][0] =
-            0.25f * (fine.data[f][0] + fine.data[f + 1][0] + fine.data[f + fine.width][0] +
-                     fine.data[f + fine.width + 1][0]);
+        const float i = 0.25f * (fine.data[f][0] + fine.data[f + 1][0] + fine.data[f + fine.width][0] +
+                                 fine.data[f + fine.width + 1][0]);
+        lvl.data[v * lvl.width + u] = {i, 0.f, 0.f};
       }
-    }
+    });
     fillGradients(lvl);
   }
 }

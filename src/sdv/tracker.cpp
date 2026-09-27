@@ -1,9 +1,14 @@
 #include <sdv/tracker.h>
 
+#include <algorithm>
 #include <cmath>
+#include <execution>
 #include <limits>
+#include <numeric>
 
 #include <Eigen/Cholesky>
+
+#include <sdv/parallel.h>
 
 namespace sdv {
 
@@ -68,34 +73,53 @@ FrameTracker::System FrameTracker::linearize(const ReferenceFrame& ref, const Im
   const double k = m_settings.huberThreshold;
   const double cutoffEnergy = huberEnergy(cutoff, k);
 
+  const Eigen::Matrix3d R = state.T_t_h.rotationMatrix();
+  const Eigen::Vector3d t = state.T_t_h.translation();
+  const auto& points = ref.points(level);
+  std::vector<System> chunks(kParallelChunks);
+  parallelChunks(points.size(), [&](size_t c, size_t begin, size_t end) {
+    System& part = chunks[c];
+    part.H.setZero();
+    part.g.setZero();
+    Eigen::Matrix<double, 1, 8> J;
+    Eigen::Vector2d uv;
+    Eigen::Matrix<double, 2, 6> dUv;
+    for (size_t i = begin; i < end; ++i) {
+      const ReferenceFrame::Point& p = points[i];
+      ++part.numPoints;
+      if (!projectBearing(p.bearing, p.rho, R, t, cam, uv, withJacobians ? &dUv : nullptr) ||
+          !cam.isInside(uv.x(), uv.y(), m_settings.border))
+        continue;
+      ++part.numVisible;
+      const Eigen::Vector3f s = img.interpolate(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
+      const double hostCentered = p.intensity - host.b;
+      const double r = (s[0] - state.affine.b) - scale * hostCentered;
+      if (std::abs(r) > cutoff) {
+        part.energy += p.gradientWeight * cutoffEnergy;
+        continue;
+      }
+      ++part.numInliers;
+      part.energy += p.gradientWeight * huberEnergy(r, k);
+      if (!withJacobians) continue;
+      J.head<6>() = Eigen::RowVector2d(s[1], s[2]) * dUv;
+      J[6] = -scale * hostCentered;
+      J[7] = -1.0;
+      const double w = p.gradientWeight * huberWeight(r, k);
+      part.H.noalias() += w * J.transpose() * J;
+      part.g.noalias() += w * r * J.transpose();
+    }
+  });
+
   System sys;
   sys.H.setZero();
   sys.g.setZero();
-  Eigen::Matrix<double, 1, 8> J;
-  Eigen::Vector2d uv;
-  Eigen::Matrix<double, 2, 6> dUv;
-  for (const auto& p : ref.points(level)) {
-    ++sys.numPoints;
-    if (!projectBearing(p.bearing, p.rho, state.T_t_h, cam, uv, withJacobians ? &dUv : nullptr) ||
-        !cam.isInside(uv.x(), uv.y(), m_settings.border))
-      continue;
-    ++sys.numVisible;
-    const Eigen::Vector3f s = img.interpolate(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
-    const double hostCentered = p.intensity - host.b;
-    const double r = (s[0] - state.affine.b) - scale * hostCentered;
-    if (std::abs(r) > cutoff) {
-      sys.energy += p.gradientWeight * cutoffEnergy;
-      continue;
-    }
-    ++sys.numInliers;
-    sys.energy += p.gradientWeight * huberEnergy(r, k);
-    if (!withJacobians) continue;
-    J.head<6>() = Eigen::RowVector2d(s[1], s[2]) * dUv;
-    J[6] = -scale * hostCentered;
-    J[7] = -1.0;
-    const double w = p.gradientWeight * huberWeight(r, k);
-    sys.H.noalias() += w * J.transpose() * J;
-    sys.g.noalias() += w * r * J.transpose();
+  for (const System& part : chunks) {
+    sys.H += part.H;
+    sys.g += part.g;
+    sys.energy += part.energy;
+    sys.numInliers += part.numInliers;
+    sys.numVisible += part.numVisible;
+    sys.numPoints += part.numPoints;
   }
 
   const double priors[2] = {m_settings.affinePriorA, m_settings.affinePriorB};
@@ -159,16 +183,23 @@ TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid
     return m_settings.maxIterations[std::min<size_t>(level, m_settings.maxIterations.size() - 1)];
   };
 
+  std::vector<State> states(hypotheses.size());
+  std::vector<System> systems(hypotheses.size());
+  std::vector<size_t> order(hypotheses.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::for_each(std::execution::par, order.begin(), order.end(), [&](size_t i) {
+    states[i] = {hypotheses[i], initialAffine};
+    systems[i] = optimizeLevel(ref, target.level(top), top, states[i], m_settings.outlierCutoff, exposureRatio,
+                               m_settings.hypothesisIterations);
+  });
   State best;
   double bestRmse = std::numeric_limits<double>::infinity();
   for (size_t i = 0; i < hypotheses.size(); ++i) {
-    State s{hypotheses[i], initialAffine};
-    const System sys = optimizeLevel(ref, target.level(top), top, s, m_settings.outlierCutoff, exposureRatio,
-                                     m_settings.hypothesisIterations);
+    const System& sys = systems[i];
     const double rmse = std::sqrt(sys.normalizedEnergy());
     if (sys.numVisible >= m_settings.minVisibleRatio * sys.numPoints && rmse < bestRmse) {
       bestRmse = rmse;
-      best = s;
+      best = states[i];
       result.hypothesis = static_cast<int>(i);
     }
   }

@@ -7,6 +7,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <sdv/parallel.h>
+
 namespace sdv {
 
 namespace {
@@ -44,7 +46,11 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   const int index = m_frameCount++;
   m_frames.emplace_back();
   m_currentRight = right;
-  auto pyr = std::make_shared<const ImagePyramid>(toFloatGray(image), m_settings.levels);
+  std::shared_ptr<const ImagePyramid> pyr;
+  {
+    auto t = m_profile.scope("pyramid");
+    pyr = std::make_shared<const ImagePyramid>(toFloatGray(image), m_settings.levels);
+  }
 
   if (!m_initialized && m_rightCam) {
     m_initialized = true;
@@ -56,6 +62,7 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   }
 
   if (!m_initialized) {
+    auto t = m_profile.scope("mono init");
     if (!m_initHost) {
       m_initializer.reset(*pyr);
       m_initHost = pyr;
@@ -75,8 +82,11 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
     return info;
   }
 
-  const TrackingResult res = m_tracker.track(*m_reference, *pyr, makeMotionHypotheses(m_T_prev_ref, m_T_prev_prevprev),
-                                             m_lastAffine);
+  TrackingResult res;
+  {
+    auto t = m_profile.scope("track");
+    res = m_tracker.track(*m_reference, *pyr, makeMotionHypotheses(m_T_prev_ref, m_T_prev_prevprev), m_lastAffine);
+  }
   m_T_prev_prevprev = res.T_t_h * m_T_prev_ref.inverse();
   m_T_prev_ref = res.T_t_h;
   m_lastAffine = res.affine;
@@ -84,7 +94,10 @@ OdometryFrameInfo Odometry::addFrame(const cv::Mat& image, const cv::Mat& right)
   if (m_referenceRmse < 0) m_referenceRmse = res.rmse;
 
   const Sophus::SE3d T_c_w = res.T_t_h * m_window.frame(m_referenceId).params.T_c_w;
-  traceCandidates(*pyr, T_c_w, res.affine);
+  {
+    auto t = m_profile.scope("trace");
+    traceCandidates(*pyr, T_c_w, res.affine);
+  }
   info.initialized = true;
   info.trackingOk = res.ok;
   info.rmse = res.rmse;
@@ -121,25 +134,40 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
   m_keyframeFrameIndex[id] = index;
   if (m_rightCam) {
     // Stereo: new candidates get a metric depth interval from the right image before activation.
+    auto t = m_profile.scope("kf select+stereo");
     selectCandidates(id);
     traceStereo(id, std::make_shared<const ImagePyramid>(toFloatGray(m_currentRight), 1));
   }
 
   const size_t before = m_window.points().size();
-  activateCandidates(id);
+  {
+    auto t = m_profile.scope("kf activate");
+    activateCandidates(id);
+  }
   const size_t activated = m_window.points().size();
-  m_window.optimize(m_settings.windowIterations);
+  {
+    auto t = m_profile.scope("kf window BA");
+    m_window.optimize(m_settings.windowIterations);
+  }
   if (m_settings.checkCalibration) m_window.logStereoDepthBias();
-  removeOutlierPoints();
-  const size_t kept = m_window.points().size();
-  storeKeyframePoses();
-  marginalizeKeyframes();
+  size_t kept;
+  {
+    auto t = m_profile.scope("kf marginalize");
+    removeOutlierPoints();
+    kept = m_window.points().size();
+    storeKeyframePoses();
+    marginalizeKeyframes();
+  }
   spdlog::debug("keyframe {}: points {} +{} activated -{} outliers -{} marginalised, activation cell {:.1f}", index,
                 before, activated - before, activated - kept, kept - m_window.points().size(), m_activationCell);
-  if (!m_rightCam) selectCandidates(id);
+  if (!m_rightCam) {
+    auto t = m_profile.scope("kf select");
+    selectCandidates(id);
+  }
 
   m_referenceId = id;
   m_lastAffine = m_window.frame(id).params.affine;
+  auto t = m_profile.scope("kf reference");
   buildReference();
   m_T_prev_ref = Sophus::SE3d();
   m_referenceRmse = -1;
@@ -170,7 +198,9 @@ void Odometry::traceStereo(int keyframeId, std::shared_ptr<const ImagePyramid> r
   HostTargetState state;
   state.T_t_h = m_T_r_l;
   const TraceSettings settings = candidateSettings();
-  for (auto& p : kf.immature) p.trace(*m_rightCam, img, state, settings);
+  parallelChunks(kf.immature.size(), [&](size_t, size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) kf.immature[i].trace(*m_rightCam, img, state, settings);
+  });
 
   // Left/right gain and offset from the matched patterns (least squares on I_r = g * I_l + b).
   double sx = 0, sy = 0, sxx = 0, sxy = 0;
@@ -208,7 +238,9 @@ void Odometry::traceCandidates(const ImagePyramid& image, const Sophus::SE3d& T_
     state.T_t_h = T_c_w * host.params.T_c_w.inverse();
     state.host = host.params.affine;
     state.target = affine;
-    for (auto& p : kf.immature) p.trace(m_camera, image.level(0), state, m_settings.trace);
+    parallelChunks(kf.immature.size(), [&](size_t, size_t begin, size_t end) {
+      for (size_t i = begin; i < end; ++i) kf.immature[i].trace(m_camera, image.level(0), state, m_settings.trace);
+    });
     std::erase_if(kf.immature, [](const ImmaturePoint& p) {
       return p.lastStatus() == TraceStatus::OutOfBounds || p.numOutliers() > p.numGood() + 2;
     });

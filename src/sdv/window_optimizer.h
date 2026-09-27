@@ -32,12 +32,31 @@ struct WindowPatternResidual {
   double energy = 0;
 };
 
+// Relative pose and brightness of a host/target pair at the current and at the linearisation parameters.
+struct WindowPairState {
+  Eigen::Matrix3d R, R0;  // T_t_h, T_t_h0
+  Eigen::Vector3d t, t0;
+  Eigen::Matrix<double, 6, 6> adj0;  // Adj(T_t_h0)
+  double scale = 1, scale0 = 1;  // exposure ratio * exp(a_t - a_h)
+  double hostB = 0, hostB0 = 0, targetB = 0;
+  bool linearizedAtCurrent = false;
+};
+
+WindowPairState makeWindowPairState(const FrameParams& host, const FrameParams& target, const FrameParams& host0,
+                                    const FrameParams& target0);
+
 // Residual at the current parameters; frame Jacobians at the linearisation parameters host0/target0 (FEJ),
 // image gradients at the current projection. DSO §2.3.
 bool evaluateWindowResidual(const PatternPoint& point, double rho, const FrameParams& host,
                             const FrameParams& target, const FrameParams& host0, const FrameParams& target0,
                             const Camera& cam, const ImageLevel& targetImg, const PhotometricSettings& settings,
                             WindowPatternResidual& out);
+bool evaluateWindowResidual(const PatternPoint& point, double rho, const WindowPairState& pair, const Camera& cam,
+                            const ImageLevel& targetImg, const PhotometricSettings& settings,
+                            WindowPatternResidual& out);
+// Energy at the current parameters only; false if the pattern leaves the image.
+bool windowResidualEnergy(const PatternPoint& point, double rho, const WindowPairState& pair, const Camera& cam,
+                          const ImageLevel& targetImg, const PhotometricSettings& settings, double& energy);
 
 struct WindowSettings {
   PhotometricSettings photometric;
@@ -131,16 +150,25 @@ class WindowOptimizer {
     Eigen::VectorXd g;
     std::vector<PointBlock> points;
   };
+  // Pair states for the current frame parameters, by frame index.
+  struct Pairs {
+    size_t numFrames = 0;
+    std::vector<WindowPairState> temporal;  // host * numFrames + target
+    std::vector<WindowPairState> stereo;  // per host
+    const WindowPairState& at(int host, int target) const { return temporal[host * numFrames + target]; }
+  };
 
   int frameIndex(int frameId) const;
+  Pairs makePairs() const;
   // Accumulates the photometric system of the given points (all if empty) over Good residuals.
-  System linearize(const std::vector<size_t>& pointIndices) const;
+  System linearize(const Pairs& pairs, const std::vector<size_t>& pointIndices) const;
   void classifyResiduals();
-  double energy() const;
-  double pointEnergy(const WindowPoint& p, double rho) const;
+  double energy(const Pairs& pairs) const;
+  double pointEnergy(const Pairs& pairs, const WindowPoint& p, double rho) const;
   double priorEnergy() const;
   void addPriors(System& sys) const;
-  bool evaluateStereo(const WindowPoint& p, double rho, WindowPatternResidual& out) const;
+  bool evaluateStereo(const Pairs& pairs, const WindowPoint& p, double rho, WindowPatternResidual& out) const;
+  bool stereoEnergy(const Pairs& pairs, const WindowPoint& p, double rho, double& energy) const;
 
   Camera m_camera;
   std::optional<Camera> m_rightCam;

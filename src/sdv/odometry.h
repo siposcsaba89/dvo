@@ -13,6 +13,7 @@
 #include <sdv/immature_point.h>
 #include <sdv/mono_initializer.h>
 #include <sdv/point_selector.h>
+#include <sdv/profiler.h>
 #include <sdv/tracker.h>
 #include <sdv/window_optimizer.h>
 
@@ -78,6 +79,7 @@ class Odometry {
   // Marginalised points plus the active points still in the window.
   std::vector<MapPoint> mapPoints() const;
   std::vector<int> keyframeIndices() const;
+  const StageProfile& profile() const { return m_profile; }
 
  private:
   struct Keyframe {
@@ -134,6 +136,7 @@ class Odometry {
   Sophus::SE3d m_T_prev_ref, m_T_prev_prevprev;
   double m_referenceRmse = -1;
   double m_activationCell;
+  StageProfile m_profile;
 };
 
 }  // namespace sdv

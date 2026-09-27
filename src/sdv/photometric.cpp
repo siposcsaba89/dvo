@@ -30,9 +30,10 @@ std::optional<PatternPoint> makePatternPoint(const Camera& cam, const ImageLevel
   return p;
 }
 
-bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Sophus::SE3d& T_t_h, const Camera& cam,
+namespace {
+
+bool projectRotated(const Eigen::Vector3d& x, double rho, const Eigen::Vector3d& t, const Camera& cam,
                     Eigen::Vector2d& uv, Eigen::Matrix<double, 2, 6>* dUvdPose, Eigen::Vector2d* dUvdRho) {
-  const Eigen::Vector3d x = T_t_h.so3() * bearing + rho * T_t_h.translation();
   if (!dUvdPose && !dUvdRho) return cam.project(x, uv);
 
   Eigen::Matrix<double, 2, 3> J;
@@ -42,8 +43,22 @@ bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Sophus::SE
     dUvdPose->leftCols<3>() = rho * J;
     dUvdPose->rightCols<3>() = -J * Sophus::SO3d::hat(x);
   }
-  if (dUvdRho) *dUvdRho = J * T_t_h.translation();
+  if (dUvdRho) *dUvdRho = J * t;
   return true;
+}
+
+}  // namespace
+
+bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Sophus::SE3d& T_t_h, const Camera& cam,
+                    Eigen::Vector2d& uv, Eigen::Matrix<double, 2, 6>* dUvdPose, Eigen::Vector2d* dUvdRho) {
+  return projectRotated(T_t_h.so3() * bearing + rho * T_t_h.translation(), rho, T_t_h.translation(), cam, uv,
+                        dUvdPose, dUvdRho);
+}
+
+bool projectBearing(const Eigen::Vector3d& bearing, double rho, const Eigen::Matrix3d& R_t_h,
+                    const Eigen::Vector3d& t_t_h, const Camera& cam, Eigen::Vector2d& uv,
+                    Eigen::Matrix<double, 2, 6>* dUvdPose, Eigen::Vector2d* dUvdRho) {
+  return projectRotated(R_t_h * bearing + rho * t_t_h, rho, t_t_h, cam, uv, dUvdPose, dUvdRho);
 }
 
 bool evaluatePatternResidual(const PatternPoint& point, double rho, const HostTargetState& state,
