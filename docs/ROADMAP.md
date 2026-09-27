@@ -292,3 +292,6 @@ hosts 100+ frames apart that are mutual nearest neighbours within 3 cm become on
 photometric BA: 110k sparse + 990k dense points, 196k pairs merged (168k with pose-graph poses: the laps agree better
 after the BA; the voxel check also keeps 4 % more dense points), 874k points written in colour
 (results/loop/garage3_dense.ply).
+KITTI 00 (4541 frames, stereo): 336k sparse points after the photometric BA, densify 100M candidates, 4.8 good traces
+each, 11.7M points after the voxel check (1531 s, ~340 ms/frame at full resolution), 754k pairs merged, 11.0M points
+written. Revisited streets show single facades in the top view.
