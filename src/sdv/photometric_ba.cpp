@@ -45,6 +45,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   std::vector<std::unique_ptr<Interpolator>> interpolators(gray.size());
   std::vector<PointData> points;
   std::vector<double> rho;
+  std::vector<Eigen::Vector2d> uvs;
   for (int k = 0; k < nk; ++k)
     for (int c = 0; c < nc; ++c) {
       const size_t i = static_cast<size_t>(k) * nc + c;
@@ -64,6 +65,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
         Eigen::Vector3d b;
         if (!pattern || !rig.cameras[c].unproject(uv, b) || f.pointRho[j] <= 0) continue;
         points.push_back({k, c, *pattern, b});
+        uvs.push_back(uv);
         rho.push_back(f.pointRho[j]);
       }
     }
@@ -249,6 +251,8 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     result.points.push_back(result.T_w_b[points[i].host] * rig.T_c_b[points[i].hostCam].inverse() *
                             (points[i].bearing / rho[i]));
     result.pointDistance.push_back(1.0 / rho[i]);
+    result.pointHost.push_back({points[i].host, points[i].hostCam});
+    result.pointUv.push_back(uvs[i]);
     result.pointDepthSigma.push_back(depthInformation[i] > 0 ? 1.0 / (rho[i] * std::sqrt(depthInformation[i]))
                                                              : std::numeric_limits<double>::infinity());
   }

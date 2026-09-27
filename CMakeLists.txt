@@ -55,6 +55,8 @@ add_library(sdv STATIC
   src/sdv/photometric.cpp
   src/sdv/point_filter.h
   src/sdv/point_filter.cpp
+  src/sdv/point_merge.h
+  src/sdv/point_merge.cpp
   src/sdv/point_selector.h
   src/sdv/point_selector.cpp
   src/sdv/profiler.h
@@ -152,6 +154,7 @@ add_executable(sdv_tests
   tests/test_odometry.cpp
   tests/test_photometric.cpp
   tests/test_ply.cpp
+  tests/test_point_merge.cpp
   tests/test_point_selector.cpp
   tests/test_pyramid.cpp
   tests/test_semi_dense_mapper.cpp

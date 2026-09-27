@@ -1,10 +1,14 @@
 // Loop closure without rerunning odometry: loop detection on run_vo keyframe records, SE3 pose graph over the
 // keyframes, and the correction applied to the run_vo poses of all frames. Metric runs only (stereo or rig), where
 // every input frame from the first one has a pose, so line i of the pose file is run frame i.
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,14 +26,16 @@
 #include <sdv/io/rig_config.h>
 #include <sdv/photometric_ba.h>
 #include <sdv/point_filter.h>
+#include <sdv/point_merge.h>
 #include <sdv/loop_detector.h>
 #include <sdv/pose_graph.h>
+#include <sdv/semi_dense_mapper.h>
 
 namespace po = boost::program_options;
 
 namespace {
 
-// Grey keyframe images of every rig camera, decoded from the run's videos (only keyframes are decoded); the rig
+// Keyframe images (colour where the videos have it) of every rig camera, decoded from the run's videos (only keyframes are decoded); the rig
 // cameras get their validity masks.
 std::vector<std::vector<cv::Mat>> loadKeyframeImages(const std::string& rigFile, const std::vector<std::string>& names,
                                                      sdv::Rig& rig, const std::vector<sdv::KeyframeRecord>& records,
@@ -56,12 +62,51 @@ std::vector<std::vector<cv::Mat>> loadKeyframeImages(const std::string& rigFile,
       ++position;
       if (input.empty()) throw std::runtime_error("video ended early: " + cams[c]->video.string());
       cv::Mat img = sdv::prepareImage(input, scale, cam);
-      if (img.channels() == 3) cv::cvtColor(img, img, cv::COLOR_BGR2GRAY);
       images[k][c] = img;
     }
     spdlog::info("loaded {} keyframe images of {}", records.size(), cams[c]->name);
   }
   return images;
+}
+
+// Images of run frame 0, 1, 2, ... of every rig camera, prepared like the run; empty at the end.
+std::function<std::vector<cv::Mat>()> rigFrames(const std::string& rigFile, const std::vector<std::string>& names,
+                                                const sdv::Rig& rig, double scale, int start, int stride) {
+  const sdv::RigConfig config = sdv::loadRigConfig(rigFile);
+  struct Stream {
+    std::shared_ptr<sdv::VideoSource> video;
+    long long position = 0, offset = 0;
+  };
+  std::vector<Stream> streams;
+  for (const auto& c : config.cameras)
+    if (names.empty() || std::find(names.begin(), names.end(), c.name) != names.end())
+      streams.push_back({std::make_shared<sdv::VideoSource>(c.video), 0, c.frameOffset});
+  return [=, frame = 0LL]() mutable {
+    std::vector<cv::Mat> images;
+    for (size_t c = 0; c < streams.size(); ++c) {
+      Stream& s = streams[c];
+      const long long wanted = s.offset + start + frame * stride;
+      for (; s.position < wanted; ++s.position)
+        if (!s.video->skip()) return std::vector<cv::Mat>{};
+      const cv::Mat input = s.video->next();
+      ++s.position;
+      if (input.empty()) return std::vector<cv::Mat>{};
+      images.push_back(sdv::prepareImage(input, scale, rig.cameras[c]));
+    }
+    ++frame;
+    return images;
+  };
+}
+
+std::array<std::uint8_t, 3> rgbAt(const cv::Mat& image, const Eigen::Vector2d& uv) {
+  const int x = std::clamp(static_cast<int>(std::lround(uv.x())), 0, image.cols - 1);
+  const int y = std::clamp(static_cast<int>(std::lround(uv.y())), 0, image.rows - 1);
+  if (image.channels() == 3) {
+    const cv::Vec3b& bgr = image.at<cv::Vec3b>(y, x);
+    return {bgr[2], bgr[1], bgr[0]};
+  }
+  const std::uint8_t g = image.at<std::uint8_t>(y, x);
+  return {g, g, g};
 }
 
 }  // namespace
@@ -70,7 +115,9 @@ int main(int argc, char** argv) {
   std::string keyframesFile, vocabularyFile, posesFile, outFile, gtFile, plyFile;
   std::vector<double> up{0, 0, 1};
   int start = 0, stride = 1;
-  bool bundleAdjust = false, photometric = false;
+  bool bundleAdjust = false, photometric = false, densify = false, merge = false;
+  sdv::SemiDenseSettings dense{.voxelSize = 0.05, .minVoxelHosts = 2};
+  sdv::PointMergeSettings mergeSettings{.minFrameGap = 100};
   std::string rigFile, sequenceDir;
   std::vector<std::string> rigCameras;
   double scale = 1.0, maxDistanceFactor = 5.0, maxDepthSigma = 0.0, neighbourRadius = 0.2;
@@ -131,7 +178,28 @@ int main(int argc, char** argv) {
       ("min-neighbours", po::value(&minNeighbours)->default_value(3), "PLY: neighbours a point needs (0 = off)")
       ("neighbour-radius", po::value(&neighbourRadius)->default_value(0.2), "PLY: neighbour radius, m")
       ("pba-min-initial", po::value(&pbaSettings.minInitialResiduals)->default_value(pbaSettings.minInitialResiduals),
-       "residuals a point needs to pass the initial check to take part");
+       "residuals a point needs to pass the initial check to take part")
+      ("densify", po::bool_switch(&densify),
+       "PLY: semi-dense points from all input frames with the final poses (needs --rig or --sequence)")
+      ("densify-points", po::value(&dense.pointsPerImage)->default_value(dense.pointsPerImage),
+       "candidate pixels per keyframe image")
+      ("densify-frames", po::value(&dense.traceFrames)->default_value(dense.traceFrames),
+       "following input frames each keyframe host is traced into")
+      ("densify-min-depth", po::value(&dense.minDepth)->default_value(dense.minDepth), "initial search range, m")
+      ("densify-min-good", po::value(&dense.minGood)->default_value(dense.minGood), "good traces a point needs")
+      ("densify-interval", po::value(&dense.maxInterval)->default_value(dense.maxInterval),
+       "relative inverse-depth half interval limit")
+      ("densify-outliers", po::value(&dense.maxOutlierRatio)->default_value(dense.maxOutlierRatio),
+       "outlier traces per good trace")
+      ("densify-voxel", po::value(&dense.voxelSize)->default_value(dense.voxelSize),
+       "multi-view check voxel, m (0 = off)")
+      ("densify-voxel-hosts", po::value(&dense.minVoxelHosts)->default_value(dense.minVoxelHosts),
+       "host images a voxel needs")
+      ("merge", po::bool_switch(&merge), "PLY: merge duplicate points of separate passes (laps)")
+      ("merge-distance", po::value(&mergeSettings.maxDistance)->default_value(mergeSettings.maxDistance),
+       "merge radius, m")
+      ("merge-frame-gap", po::value(&mergeSettings.minFrameGap)->default_value(mergeSettings.minFrameGap),
+       "input frames between the hosts of merged points");
   try {
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv)
@@ -188,9 +256,10 @@ int main(int argc, char** argv) {
     }
     std::vector<Sophus::SE3d> beforePhotometric = after;
     sdv::PhotometricBAResult pba;
-    if (photometric) {
-      if (rigFile.empty() == sequenceDir.empty()) throw std::invalid_argument("--photometric needs --rig or --sequence");
-      std::vector<std::vector<cv::Mat>> images;
+    std::vector<std::vector<cv::Mat>> images;
+    if (photometric || (densify && !plyFile.empty())) {
+      if (rigFile.empty() == sequenceDir.empty())
+        throw std::invalid_argument("--photometric and --densify need --rig or --sequence");
       if (!sequenceDir.empty()) {
         // KITTI stereo: camera 0 = image_0, camera 1 = image_1, cropped like the run.
         const sdv::KittiSequence seq(sequenceDir, 1);
@@ -204,6 +273,8 @@ int main(int argc, char** argv) {
       } else {
         images = loadKeyframeImages(rigFile, rigCameras, rig, records, scale, start, stride);
       }
+    }
+    if (photometric) {
       std::vector<std::pair<int, int>> pairs;
       for (size_t k = 0; k < loops.size(); ++k)
         if (graph.loopAccepted[k]) pairs.emplace_back(loops[k].query, loops[k].match);
@@ -253,6 +324,7 @@ int main(int argc, char** argv) {
       sdv::PlyScene scene;
       std::vector<Sophus::SE3d> kfs = after;
       scene.addTrajectory(kfs, {220, 0, 0});
+      std::vector<sdv::MapPoint> cloud;
       if (photometric && !pba.points.empty()) {
         // As in run_vo: distance limit (points near infinity), residuals left, depth uncertainty, isolated points.
         std::vector<double> d = pba.pointDistance;
@@ -265,21 +337,98 @@ int main(int argc, char** argv) {
         if (!sigma.empty())
           spdlog::info("points with residuals: {}, relative depth sigma {:.3g} / {:.3g} / {:.3g} (10/50/90 %)",
                        sigma.size(), sigma[sigma.size() / 10], sigma[sigma.size() / 2], sigma[sigma.size() * 9 / 10]);
-        std::vector<Eigen::Vector3d> candidates;
         for (size_t i = 0; i < pba.points.size(); ++i)
           if (pba.pointDistance[i] <= limit && pba.pointResiduals[i] >= minResiduals &&
-              (maxDepthSigma <= 0 || pba.pointDepthSigma[i] <= maxDepthSigma))
-            candidates.push_back(pba.points[i]);
-        const std::vector<char> keep = sdv::hasNeighbours(candidates, neighbourRadius, minNeighbours);
-        size_t kept = 0;
-        for (size_t i = 0; i < candidates.size(); ++i)
-          if (keep[i]) scene.addPoint(candidates[i], {200, 200, 200}), ++kept;
-        spdlog::info("{} of {} points written ({} after distance {:.1f} m, {}+ residuals, depth sigma; then {}+ "
-                     "neighbours within {:.2f} m)",
-                     kept, pba.points.size(), candidates.size(), limit, minResiduals, minNeighbours, neighbourRadius);
+              (maxDepthSigma <= 0 || pba.pointDepthSigma[i] <= maxDepthSigma)) {
+            const auto [k, c] = pba.pointHost[i];
+            const auto rgb = rgbAt(images[k][c], pba.pointUv[i]);
+            cloud.push_back({pba.points[i], static_cast<float>(rgb[1]), records[k].frameIndex, c, pba.pointUv[i],
+                             pba.pointDistance[i], pba.pointResiduals[i], pba.pointDepthSigma[i],
+                             sdv::MapPointSource::Active, rgb});
+          }
+        spdlog::info("{} of {} bundle-adjusted points pass distance {:.1f} m, {}+ residuals, depth sigma", cloud.size(),
+                     pba.points.size(), limit, minResiduals);
       } else {
         for (const auto& p : ba.points) scene.addPoint(p, {200, 200, 200});
       }
+      if (densify) {
+        const auto t0 = std::chrono::steady_clock::now();
+        // All input frames with the corrected poses, keyframes as hosts: between keyframes the small baselines narrow
+        // the epipolar search step by step (keyframes alone leave most traces ambiguous). Brightness between
+        // keyframes is interpolated.
+        auto keyframeBrightness = [&](size_t k, int c) {
+          if (photometric) return pba.affine[k][c];
+          return c < static_cast<int>(records[k].affine.size()) ? records[k].affine[c] : sdv::AffineBrightness{};
+        };
+        auto nextFrame = !sequenceDir.empty()
+                             ? std::function<std::vector<cv::Mat>()>(
+                                   [&, seq = std::make_shared<sdv::KittiSequence>(sequenceDir, 1), i = size_t{0}]() mutable {
+                                     std::vector<cv::Mat> imgs;
+                                     const size_t index = static_cast<size_t>(start) + i++ * stride;
+                                     if (index >= seq->size()) return imgs;
+                                     for (int c = 0; c < rig.size(); ++c)
+                                       imgs.push_back(sdv::prepareImage(seq->loadImage(index, c), scale, rig.cameras[c]));
+                                     return imgs;
+                                   })
+                             : rigFrames(rigFile, rigCameras, rig, scale, start, stride);
+        sdv::SemiDenseMapper mapper(rig, dense);
+        size_t k = 0;
+        for (size_t i = 0; i < poses.size(); ++i) {
+          const std::vector<cv::Mat> frame = nextFrame();
+          if (frame.empty()) break;
+          while (k + 1 < records.size() && records[k + 1].frameIndex <= static_cast<int>(i)) ++k;
+          const bool host = records[k].frameIndex == static_cast<int>(i);
+          std::vector<sdv::AffineBrightness> brightness(static_cast<size_t>(rig.size()));
+          const int f0 = records[k].frameIndex;
+          const int f1 = k + 1 < records.size() ? records[k + 1].frameIndex : f0;
+          const double w = f1 > f0 ? std::clamp((static_cast<double>(i) - f0) / (f1 - f0), 0.0, 1.0) : 0.0;
+          for (int c = 0; c < rig.size(); ++c) {
+            const auto a = keyframeBrightness(k, c), b = keyframeBrightness(std::min(k + 1, records.size() - 1), c);
+            brightness[c] = {(1 - w) * a.a + w * b.a, (1 - w) * a.b + w * b.b};
+          }
+          mapper.addFrame(static_cast<int>(i), frame, poses[i], brightness, host);
+          if ((i + 1) % 200 == 0) spdlog::info("densify: {} frames", i + 1);
+        }
+        std::vector<sdv::MapPoint> densePoints = mapper.finish();
+        std::vector<double> d;
+        for (const auto& p : densePoints) d.push_back(p.distance);
+        double limit = std::numeric_limits<double>::infinity();
+        if (!d.empty()) {
+          std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+          limit = maxDistanceFactor * d[d.size() / 2];
+        }
+        const auto& st = mapper.stats();
+        size_t added = 0;
+        for (const auto& p : densePoints)
+          if (p.distance <= limit) cloud.push_back(p), ++added;
+        spdlog::info("densify: {} candidates, {:.1f} good traces each, {} accepted (rejected: {} too few matches, {} "
+                     "imprecise), {} after voxel check, {} within {:.1f} m, {:.1f} s",
+                     st.candidates, static_cast<double>(st.good) / std::max<long long>(st.candidates, 1), st.accepted,
+                     st.rejectMatches, st.rejectInterval, densePoints.size(), added, limit,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+      }
+      if (merge) {
+        size_t merged = 0;
+        const size_t unmerged = cloud.size();
+        cloud = sdv::mergeDuplicatePoints(cloud, mergeSettings, &merged);
+        spdlog::info("merge: {} -> {} points ({} pairs within {:.3f} m, hosts {}+ frames apart)", unmerged, cloud.size(),
+                     merged, mergeSettings.maxDistance, mergeSettings.minFrameGap);
+      }
+      std::vector<Eigen::Vector3d> positions;
+      for (const auto& p : cloud) positions.push_back(p.position);
+      const std::vector<char> keep = sdv::hasNeighbours(positions, neighbourRadius, minNeighbours);
+      size_t kept = 0;
+      for (size_t i = 0; i < cloud.size(); ++i)
+        if (keep[i]) {
+          const float g = std::clamp(cloud[i].intensity, 0.f, 255.f);
+          scene.addPoint(cloud[i].position,
+                         cloud[i].color.value_or(std::array<std::uint8_t, 3>{static_cast<std::uint8_t>(g),
+                                                                             static_cast<std::uint8_t>(g),
+                                                                             static_cast<std::uint8_t>(g)}));
+          ++kept;
+        }
+      spdlog::info("{} of {} points written ({}+ neighbours within {:.2f} m)", kept, cloud.size(), minNeighbours,
+                   neighbourRadius);
       scene.write(plyFile);
       spdlog::info("wrote {}", plyFile);
     }

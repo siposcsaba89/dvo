@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,8 @@ struct PhotometricBAResult {
   std::vector<std::vector<AffineBrightness>> affine;
   std::vector<Eigen::Vector3d> points;  // world, all hosted points of the records that were used
   std::vector<double> pointDistance;  // from the host camera
+  std::vector<std::array<int, 2>> pointHost;  // keyframe (record index), camera
+  std::vector<Eigen::Vector2d> pointUv;  // in the host camera image
   std::vector<int> pointResiduals;  // residuals left after outlier removal (0: not used)
   // Inverse-depth standard deviation relative to the inverse depth, for unit photometric noise, from the depth
   // information of the final residuals (other parameters fixed), as MapPoint::relativeDepthSigma of active points.

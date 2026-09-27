@@ -281,3 +281,14 @@ Garage: 933k residuals, 194k across laps (was 55k), rmse 13.8 -> 7.3, 168 s, 75.
 (100 points/image): 4.29M residuals, 88k across loops, 673 s; ATE odometry 3.95 m (horizontal 2.02, vertical 3.39),
 pose graph 0.893 (0.774 / 0.446), photometric BA 0.948 (0.828 / 0.461; was 1.005). Still not below the pose graph on
 KITTI, whose ground truth is itself inconsistent at this level; the BA stays optional.
+
+Follow-up (step 17): densify on the final poses and merge duplicates across passes (close_loops, no export format yet).
+`--densify` streams all input frames of the run with the loop-corrected poses (keyframe brightness interpolated in
+between) through `SemiDenseMapper`, keyframes as hosts. Keyframes alone are not enough: over their baselines the
+first epipolar searches are long and ambiguous (garage: 1.7 good traces per candidate, 148k points), all frames give
+11.9 good traces and 991k points after the 5 cm multi-host voxel check (235 s). `--merge` (`point_merge`): points of
+hosts 100+ frames apart that are mutual nearest neighbours within 3 cm become one point (position weighted by
+1/distance^2, the closer host kept, observations summed; two rounds so a third pass can join). Garage after the
+photometric BA: 110k sparse + 990k dense points, 196k pairs merged (168k with pose-graph poses: the laps agree better
+after the BA; the voxel check also keeps 4 % more dense points), 874k points written in colour
+(results/loop/garage3_dense.ply).
