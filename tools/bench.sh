@@ -4,7 +4,8 @@
 set -u
 tag=$1; mode=${2:-stereo}; len=${3:-500}; shift $(( $# < 3 ? $# : 3 ))
 root=$(cd "$(dirname "$0")/.." && pwd)
-exe="$root/build/Release/run_vo.exe"
+exe="$root/build/Release/run_vo_bench_$tag-$mode.exe"
+cp "$root/build/Release/run_vo.exe" "$exe"
 out="$root/results/bench/$tag-$mode"
 mkdir -p "$out"
 seqdir=E:/records/kitti/sequences/00
@@ -18,6 +19,7 @@ for s in $starts; do
     -o "$out/$s.txt" "$@" > "$out/$s.log" 2>&1 &
 done
 wait
+rm -f "$exe"
 
 printf "%6s %8s %8s %8s %8s %6s %6s\n" start ate_sim3 ate_se3 drift_t drift_r scale ms
 for s in $starts; do

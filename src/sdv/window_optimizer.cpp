@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 #include <Eigen/Cholesky>
+#include <spdlog/spdlog.h>
 
 namespace sdv {
 
@@ -144,14 +146,14 @@ void WindowOptimizer::setFrameStereo(int frameId, std::shared_ptr<const ImagePyr
   f.stereoAffine = stereoAffine;
 }
 
-bool WindowOptimizer::evaluateStereo(const WindowPoint& p, WindowPatternResidual& out) const {
+bool WindowOptimizer::evaluateStereo(const WindowPoint& p, double rho, WindowPatternResidual& out) const {
   if (!m_rightCam) return false;
   const WindowFrame& host = m_frames[frameIndex(p.host)];
   if (!host.right) return false;
   // Host at the origin with neutral brightness, so the pattern's raw intensities map through the stereo affine.
   const FrameParams left{Sophus::SE3d(), {}, 1.0};
   const FrameParams right{m_T_r_l, host.stereoAffine, 1.0};
-  if (!evaluateWindowResidual(p.pattern, p.rho, left, right, left, right, *m_rightCam, host.right->level(0),
+  if (!evaluateWindowResidual(p.pattern, rho, left, right, left, right, *m_rightCam, host.right->level(0),
                               m_settings.photometric, out))
     return false;
   for (auto& px : out.pixels) px.weight *= m_settings.stereoWeight;
@@ -211,7 +213,7 @@ WindowOptimizer::System WindowOptimizer::linearize(const std::vector<size_t>& po
       pb.Hfr[h] += hrh;
       pb.Hfr[t] += hrt;
     }
-    if (p.stereoState == ResidualState::Good && evaluateStereo(p, res))
+    if (p.stereoState == ResidualState::Good && evaluateStereo(p, p.rho, res))
       for (const auto& px : res.pixels) {
         pb.Hrr += px.weight * px.dRho * px.dRho;
         pb.gr += px.weight * px.r * px.dRho;
@@ -238,7 +240,7 @@ void WindowOptimizer::classifyResiduals() {
       r.energy = res.energy;
       r.state = res.energy > maxEnergy ? ResidualState::Outlier : ResidualState::Good;
     }
-    if (!evaluateStereo(p, res)) {
+    if (!evaluateStereo(p, p.rho, res)) {
       p.stereoState = ResidualState::OutOfBounds;
       continue;
     }
@@ -272,22 +274,26 @@ void WindowOptimizer::addPriors(System& sys) const {
   sys.g += m_priorH * delta + m_priorB;
 }
 
-double WindowOptimizer::energy() const {
+double WindowOptimizer::pointEnergy(const WindowPoint& p, double rho) const {
   double e = 0;
   WindowPatternResidual res;
-  for (const auto& p : m_points) {
-    const WindowFrame& hf = m_frames[frameIndex(p.host)];
-    for (const auto& r : p.residuals) {
-      if (r.state != ResidualState::Good) continue;
-      const WindowFrame& tf = m_frames[frameIndex(r.target)];
-      // Leaving the image keeps the classification energy, so it is neither rewarded nor penalised.
-      e += evaluateWindowResidual(p.pattern, p.rho, hf.params, tf.params, hf.params, tf.params, m_camera,
-                                  tf.image->level(0), m_settings.photometric, res)
-               ? res.energy
-               : r.energy;
-    }
-    if (p.stereoState == ResidualState::Good) e += evaluateStereo(p, res) ? res.energy : p.stereoEnergy;
+  const WindowFrame& hf = m_frames[frameIndex(p.host)];
+  for (const auto& r : p.residuals) {
+    if (r.state != ResidualState::Good) continue;
+    const WindowFrame& tf = m_frames[frameIndex(r.target)];
+    // Leaving the image keeps the classification energy, so it is neither rewarded nor penalised.
+    e += evaluateWindowResidual(p.pattern, rho, hf.params, tf.params, hf.params, tf.params, m_camera,
+                                tf.image->level(0), m_settings.photometric, res)
+             ? res.energy
+             : r.energy;
   }
+  if (p.stereoState == ResidualState::Good) e += evaluateStereo(p, rho, res) ? res.energy : p.stereoEnergy;
+  return e;
+}
+
+double WindowOptimizer::energy() const {
+  double e = 0;
+  for (const auto& p : m_points) e += pointEnergy(p, p.rho);
   return e + priorEnergy();
 }
 
@@ -342,8 +348,32 @@ WindowOptimizationResult WindowOptimizer::optimize(int maxIterations) {
       m_points[i].rho = rho > 0 ? rho : 0.5 * m_points[i].rho;
     }
 
+    // Given the frames, points are independent: a point keeps its depth step (or half of it) only if that lowers
+    // its own energy. The photometric error is far from linear in depth; without this about half of the points
+    // overshoot in every step and one bad point rejects the whole step, so the window never converges (KITTI 00).
     ++result.iterations;
-    const double next = energy();
+    double next = priorEnergy();
+    int reverted = 0;
+    for (size_t i = 0; i < m_points.size(); ++i) {
+      WindowPoint& p = m_points[i];
+      double e = pointEnergy(p, p.rho);
+      if (const double eOld = pointEnergy(p, backupRho[i]); eOld < e) {
+        const double half = 0.5 * (p.rho + backupRho[i]);
+        const double eHalf = pointEnergy(p, half);
+        if (eHalf < eOld) {
+          p.rho = half;
+          e = eHalf;
+        } else {
+          p.rho = backupRho[i];
+          e = eOld;
+          ++reverted;
+        }
+      }
+      next += e;
+    }
+    spdlog::trace("window BA iteration {}: lambda {:.1e}, energy {:.1f} -> {:.1f}, {} of {} depth steps reverted", it,
+                  lambda, current, next, reverted, m_points.size());
+
     if (next < current) {
       current = next;
       lambda = std::max(lambda * 0.5, 1e-7);
@@ -409,6 +439,55 @@ void WindowOptimizer::marginalizeFrame(int frameId) {
   for (auto& p : m_points)
     std::erase_if(p.residuals, [&](const WindowResidual& r) { return r.target == frameId; });
   m_frames.erase(m_frames.begin() + k);
+}
+
+
+void WindowOptimizer::logStereoDepthBias() const {
+  if (!m_rightCam) return;
+  constexpr int kSteps = 61;
+  constexpr double kRange = 0.15;  // searched log inverse depth range around the start value
+  const double inf = std::numeric_limits<double>::infinity();
+  auto argminLog = [&](auto&& energyAt, double rho) {
+    double best = inf, bestL = 0;
+    for (int s = 0; s < kSteps; ++s) {
+      const double l = -kRange + 2 * kRange * s / (kSteps - 1);
+      if (const double e = energyAt(rho * std::exp(l)); e < best) best = e, bestL = l;
+    }
+    return std::abs(bestL) < 0.99 * kRange ? std::optional(bestL) : std::nullopt;
+  };
+
+  double sum[3] = {};
+  int count[3] = {};
+  WindowPatternResidual res;
+  for (const auto& p : m_points) {
+    if (p.stereoState != ResidualState::Good || p.rho <= 0) continue;
+    const auto ls = argminLog([&](double r) { return evaluateStereo(p, r, res) ? res.energy : inf; }, p.rho);
+    if (!ls) continue;
+    const double rhoStereo = p.rho * std::exp(*ls);
+    const WindowFrame& hf = m_frames[frameIndex(p.host)];
+    const double radius = std::hypot(p.pattern.uv.x() - m_camera.cx, p.pattern.uv.y() - m_camera.cy) /
+                          std::hypot(m_camera.width / 2.0, m_camera.height / 2.0);
+    const int bin = std::min(2, static_cast<int>(radius * 3));
+    for (const auto& r : p.residuals) {
+      if (r.state != ResidualState::Good) continue;
+      const WindowFrame& tf = m_frames[frameIndex(r.target)];
+      const auto lt = argminLog(
+          [&](double rho) {
+            return evaluateWindowResidual(p.pattern, rho, hf.params, tf.params, hf.params, tf.params, m_camera,
+                                          tf.image->level(0), m_settings.photometric, res)
+                       ? res.energy
+                       : inf;
+          },
+          rhoStereo);
+      if (!lt) continue;
+      sum[bin] += *lt;
+      ++count[bin];
+    }
+  }
+  auto mean = [&](int b) { return count[b] ? 100.0 * sum[b] / count[b] : 0.0; };
+  spdlog::info("temporal vs stereo inverse depth by image radius (inner/middle/outer third): {:+.2f} {:+.2f} {:+.2f} % "
+               "({} {} {} residuals)",
+               mean(0), mean(1), mean(2), count[0], count[1], count[2]);
 }
 
 }  // namespace sdv

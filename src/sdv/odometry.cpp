@@ -129,6 +129,7 @@ int Odometry::createKeyframe(std::shared_ptr<const ImagePyramid> image, const So
   activateCandidates(id);
   const size_t activated = m_window.points().size();
   m_window.optimize(m_settings.windowIterations);
+  if (m_settings.checkCalibration) m_window.logStereoDepthBias();
   removeOutlierPoints();
   const size_t kept = m_window.points().size();
   storeKeyframePoses();

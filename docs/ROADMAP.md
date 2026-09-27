@@ -41,3 +41,40 @@ above are dominated by 100 m segments and overstate rotation drift.
 |--------|-----------------------------------|----------------------------------|
 | baseline | 0.474 / 0.85 / 0.435 | 17.9 / 15.7 / 4.16 (segment 4000 diverges) |
 | drop points only without any good residual | 0.494 / 0.85 / 0.465 | 4.08 / 4.52 / 0.466 |
+
+Parameter sweep on top of that (not adopted; ms/frame measured with two benchmarks sharing the CPU):
+
+| Variant | Stereo ATE SE3 / t % / r | Mono ATE Sim3 / t % / r |
+|---------|--------------------------|-------------------------|
+| 3000 active points | 0.471 / 0.84 / 0.439 (+50 % time) | 4.22 / 4.66 / 0.450 |
+| 9 keyframes | 0.518 / 0.86 / 0.452 | 6.15 / 6.32 / 1.21 |
+| stereo weight 2 / 0.5 | 0.492 / 0.88 / 0.471 ; 0.686 / 0.92 / 0.438 | - |
+| fewer keyframes (kf-flow 180, tflow 75) | - | 7.73 / 7.94 / 1.88 |
+| more keyframes (kf-flow 80, tflow 35) | - | 3.99 / 4.46 / 0.456 (+75 % time) |
+| candidate activation also after Skipped/Ambiguous traces | 0.488 / 0.84 / 0.446 | 4.15 / 4.60 / 0.465 |
+| 12 / 20 window BA iterations | 0.493 / 0.86 / 0.474 ; 0.494 / 0.86 / 0.450 | 4.12 / 4.56 / 0.461 ; 4.15 / 4.59 / 0.456 |
+
+Full sequence (4541 frames, 3.7 km, segments 100-800 m as in the KITTI benchmark), before the camera correction:
+stereo 0.78 % / 0.268 deg/100m, ATE SE3 3.5 m (Stereo DSO paper: 0.84 % / 0.26). Mono 39 % / 1.93: the scale
+grows monotonically ~7x over 3000 frames and then collapses. So stereo was already on par; the short-segment
+rotation drift was an evaluation artefact.
+
+Mono scale drift root cause: every window BA moved existing points ~0.7 % farther away, in stereo too. Two parts:
+1. The window BA did not converge: in every LM step about half of the points overshoot in depth (photometric
+   error is far from linear in depth) and single points reject whole steps. Fixed with a per-point depth
+   safeguard (keep the step, half of it, or the old depth, whichever has the lowest point energy).
+2. The KITTI rectified camera model is slightly off. Per temporal residual, the best inverse depth is 1-2 %
+   below the stereo optimum, growing with image radius and with the same sign for older and newer keyframes:
+   residual pincushion distortion. EUCM alpha = -0.03 (both cameras) removes most of it; focal scale (+-1 %) and
+   principal point (+-4 px) do not. Consistent with Cvisic et al., "Recalibrating the KITTI Dataset Camera Setup
+   for Improved Odometry Accuracy", ECMR 2021 (weakly constrained intrinsics, 30 % / 50 % odometry gains from
+   recalibration). `run_vo --cam-alpha` applies it (also to the COLMAP export), `--check-calibration` logs the
+   temporal vs stereo depth bias per image radius for any stereo rig.
+
+| Change | Stereo ATE SE3 / t % / r deg/100m | Mono ATE Sim3 / t % / r deg/100m |
+|--------|-----------------------------------|----------------------------------|
+| per-point depth safeguard in the window BA | 0.496 / 0.85 / 0.443 | 4.10 / 4.53 / 0.459 |
+| + `--cam-alpha -0.03` | 0.501 / 0.79 / 0.428 | 0.995 / 1.28 / 0.430 |
+
+Full-sequence mono with the safeguard: alpha 0: 39 % / 1.93, alpha -0.03: 6.4 % / 0.281, alpha -0.035: 1.15 % /
+0.288 with ATE Sim3 6.9 m and local scale within +-5 % over 3.7 km; alpha -0.04 reverses the drift.

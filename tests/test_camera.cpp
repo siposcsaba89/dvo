@@ -6,6 +6,8 @@ namespace {
 
 const sdv::Camera kFisheye = sdv::Camera::eucm(380.0, 381.0, 640.3, 400.7, 0.62, 1.05, 1280, 800);
 const sdv::Camera kPinhole = sdv::Camera::pinhole(718.856, 718.856, 607.19, 185.22, 1232, 368);
+// Rectified pinhole with a residual pincushion correction (negative alpha).
+const sdv::Camera kPincushion = sdv::Camera::eucm(718.856, 718.856, 607.19, 185.22, -0.035, 1.0, 1232, 368);
 
 void checkRoundTrip(const sdv::Camera& cam) {
   for (double v = 5; v < cam.height - 5; v += 37.3) {
@@ -44,6 +46,7 @@ void checkJacobian(const sdv::Camera& cam, const Eigen::Vector3d& p) {
 
 TEST(Camera, PinholeRoundTrip) { checkRoundTrip(kPinhole); }
 TEST(Camera, FisheyeRoundTrip) { checkRoundTrip(kFisheye); }
+TEST(Camera, PincushionRoundTrip) { checkRoundTrip(kPincushion); }
 
 TEST(Camera, PinholeMatchesClassicFormula) {
   const Eigen::Vector3d p(1.2, -0.4, 7.5);
@@ -66,6 +69,7 @@ TEST(Camera, ProjectionJacobians) {
                         Eigen::Vector3d(0.0, 0.0, 1.0)}) {
     checkJacobian(kPinhole, p);
     checkJacobian(kFisheye, p);
+    checkJacobian(kPincushion, p);
   }
   checkJacobian(kFisheye, Eigen::Vector3d(2.0, 0.5, -0.1));
 }
@@ -77,4 +81,13 @@ TEST(Camera, LevelScalingKeepsRayConsistent) {
   ASSERT_TRUE(kFisheye.atLevel(2).project(p, uv2));
   EXPECT_NEAR(uv2.x(), ((uv0.x() - 0.5) / 2 - 0.5) / 2, 1e-9);
   EXPECT_NEAR(uv2.y(), ((uv0.y() - 0.5) / 2 - 0.5) / 2, 1e-9);
+}
+
+TEST(Camera, NegativeAlphaIsPincushion) {
+  // Off-axis rays land farther from the centre than with the plain pinhole.
+  const Eigen::Vector3d p(0.8, 0.2, 1.0);
+  Eigen::Vector2d pin, pc;
+  ASSERT_TRUE(kPinhole.project(p, pin));
+  ASSERT_TRUE(kPincushion.project(p, pc));
+  EXPECT_GT(pc.x() - kPincushion.cx, pin.x() - kPinhole.cx);
 }

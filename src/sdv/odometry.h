@@ -40,6 +40,7 @@ struct OdometrySettings {
   double marginalizeVisibleFraction = 0.05;  // DSO §3.1
   double stereoMinDepth = 1.5;  // bounds the initial stereo search range
   int stereoMaxSamples = 400;
+  bool checkCalibration = false;  // stereo: log the temporal vs stereo depth bias at every keyframe
 };
 
 struct MapPoint {

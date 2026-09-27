@@ -8,7 +8,8 @@ namespace sdv {
 
 // EUCM: Khomutenko et al., RA-L 2016 (eq. 11 projection, 50 Jacobian, 37 inverse).
 // Projection domain z > -w*d from Usenko et al., Double Sphere, 3DV 2018.
-// Integer pixel coordinates are pixel centres.
+// Integer pixel coordinates are pixel centres. A small negative alpha (outside the EUCM paper range) models
+// residual pincushion distortion of rectified images, e.g. KITTI (see docs/ROADMAP.md, step 11).
 class Camera {
  public:
   double fx = 0, fy = 0, cx = 0, cy = 0;

@@ -28,9 +28,9 @@ namespace po = boost::program_options;
 int main(int argc, char** argv) {
   std::string sequenceDir, gtFile, outFile, plyFile, jsonFile, pngFile, colmapDir;
   bool colmapKeyframesOnly = false, colmapAlign = false;
-  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, traceOutlier = 12.0;
+  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, camAlpha = 0.0;
   size_t start = 0, maxFrames = 100;
-  bool verbose = false, stereo = false;
+  bool verbose = false, trace = false, stereo = false, checkCalibration = false;
   sdv::OdometrySettings settings;
 
   po::options_description desc("run_vo options");
@@ -59,13 +59,16 @@ int main(int argc, char** argv) {
       ("kf-flow", po::value(&settings.kfFlow)->default_value(settings.kfFlow), "keyframe flow scale (px)")
       ("kf-tflow", po::value(&settings.kfTranslationFlow)->default_value(settings.kfTranslationFlow),
        "keyframe translation flow scale (px)")
-      ("trace-samples", po::value(&settings.trace.maxSamples)->default_value(settings.trace.maxSamples),
-       "max samples per epipolar search")
-      ("ba-outlier", po::value(&settings.window.outlierThreshold)->default_value(settings.window.outlierThreshold),
-       "window BA residual outlier threshold (intensity)")
-      ("trace-outlier", po::value(&traceOutlier)->default_value(12.0), "candidate tracing outlier threshold (intensity)")
-      ("act-error", po::value(&settings.activationMaxErrorPixels)->default_value(settings.activationMaxErrorPixels),
-       "max candidate depth error (px) for activation")
+      ("stereo-weight", po::value(&settings.window.stereoWeight)->default_value(settings.window.stereoWeight),
+       "weight of static stereo residuals")
+      ("ba-iterations", po::value(&settings.windowIterations)->default_value(settings.windowIterations),
+       "window BA iterations per keyframe")
+      ("cam-alpha", po::value(&camAlpha)->default_value(0.0),
+       "EUCM alpha for both cameras; a small negative value corrects residual pincushion distortion of the "
+       "rectified images (KITTI 00: -0.03)")
+      ("check-calibration", po::bool_switch(&checkCalibration),
+       "stereo: log the temporal vs stereo depth bias per image radius at every keyframe")
+      ("trace", po::bool_switch(&trace), "trace logging (implies verbose)")
       ("verbose,v", po::bool_switch(&verbose), "debug logging");
   try {
     po::variables_map vm;
@@ -80,14 +83,16 @@ int main(int argc, char** argv) {
     std::cout << desc << '\n';
     return EXIT_FAILURE;
   }
-  if (verbose) spdlog::set_level(spdlog::level::debug);
-  settings.trace.outlierEnergyPerPixel = traceOutlier * traceOutlier;
+  if (verbose || trace) spdlog::set_level(trace ? spdlog::level::trace : spdlog::level::debug);
+  settings.checkCalibration = checkCalibration;
 
   try {
     const sdv::KittiSequence seq(sequenceDir, 1 << (settings.levels - 1));
     const size_t n = std::min(maxFrames, seq.size() - start);
-    sdv::Odometry vo(seq.camera(), settings);
-    if (stereo) vo.enableStereo(seq.camera(), Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-seq.baseline(), 0, 0)));
+    sdv::Camera camera = seq.camera();
+    camera.alpha = camAlpha;
+    sdv::Odometry vo(camera, settings);
+    if (stereo) vo.enableStereo(camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-seq.baseline(), 0, 0)));
 
     using Clock = std::chrono::steady_clock;
     double totalMs = 0, maxMs = 0;
@@ -221,7 +226,7 @@ int main(int argc, char** argv) {
 
     if (!colmapDir.empty()) {
       const std::filesystem::path root(colmapDir);
-      const sdv::Camera& cam = seq.camera();
+      const sdv::Camera& cam = camera;
       const sdv::Camera exportCam = cam.isPinhole() ? cam : sdv::virtualPinhole(cam, focalScale);
       const auto undistortMap = cam.isPinhole() ? sdv::UndistortMap{} : sdv::makeUndistortMap(cam, exportCam);
       std::filesystem::create_directories(root / "images");

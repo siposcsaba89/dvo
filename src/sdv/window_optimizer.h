@@ -110,6 +110,10 @@ class WindowOptimizer {
   bool stereo() const { return m_rightCam.has_value(); }
 
   WindowOptimizationResult optimize(int maxIterations = -1);
+  // Calibration check for stereo rigs: per temporal residual, the inverse depth minimising that residual alone
+  // relative to the stereo optimum, averaged per image-radius third. A trend with radius means a camera model
+  // error; it biases monocular depth and makes the scale drift.
+  void logStereoDepthBias() const;
   void marginalizeFrame(int frameId);
 
   const std::vector<WindowFrame>& frames() const { return m_frames; }
@@ -133,9 +137,10 @@ class WindowOptimizer {
   System linearize(const std::vector<size_t>& pointIndices) const;
   void classifyResiduals();
   double energy() const;
+  double pointEnergy(const WindowPoint& p, double rho) const;
   double priorEnergy() const;
   void addPriors(System& sys) const;
-  bool evaluateStereo(const WindowPoint& p, WindowPatternResidual& out) const;
+  bool evaluateStereo(const WindowPoint& p, double rho, WindowPatternResidual& out) const;
 
   Camera m_camera;
   std::optional<Camera> m_rightCam;
