@@ -39,7 +39,9 @@ int main(int argc, char** argv) {
       colmapDir;
   std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
-  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, scale = 1.0;
+  double focalScale = 1.0, maxDistanceFactor = 5.0, maxDistance = 0.0, scale = 1.0, maxDepthSigma = 0.0,
+         neighbourRadius = 0.2;
+  int minObservations = 1, minNeighbours = 0;
   std::optional<double> camAlpha;
   size_t start = 0, stride = 1, maxFrames = 0;
   bool verbose = false, trace = false, stereo = false, checkCalibration = false;
@@ -71,6 +73,13 @@ int main(int argc, char** argv) {
        "drop map points farther than this times the median distance from their camera (0 = off)")
       ("max-distance", po::value(&maxDistance)->default_value(0.0),
        "drop map points farther than this from their camera, metres after alignment (0 = off)")
+      ("min-observations", po::value(&minObservations)->default_value(1),
+       "drop map points with fewer good residuals (other cameras and keyframes)")
+      ("max-depth-sigma", po::value(&maxDepthSigma)->default_value(0.0),
+       "drop map points whose relative inverse-depth sigma (unit photometric noise) exceeds this (0 = off)")
+      ("min-neighbours", po::value(&minNeighbours)->default_value(0),
+       "drop map points with fewer neighbours within --neighbour-radius (0 = off)")
+      ("neighbour-radius", po::value(&neighbourRadius)->default_value(0.2), "neighbour radius, metres after alignment")
       ("json", po::value(&jsonFile), "write trajectory, GT, keyframes and map points as JSON (viewer data)")
       ("png", po::value(&pngFile), "write a top-down preview image")
       ("keyframes", po::value(&settings.maxKeyframes)->default_value(7), "keyframes in the window")
@@ -306,9 +315,56 @@ int main(int argc, char** argv) {
       std::erase_if(mapPoints, [&](const sdv::MapPoint& p) {
         return p.distance > limit || (maxDistance > 0 && p.distance * alignment.scale > maxDistance);
       });
-      spdlog::info("kept {} of {} map points (distance limit {:.1f} m{})", mapPoints.size(), before,
+      spdlog::info("kept {} of {} map points (distance limit {:.1f}{})", mapPoints.size(), before,
                    std::min(limit * alignment.scale, maxDistance > 0 ? maxDistance : 1e30),
-                   gt.empty() ? ", unscaled units" : "");
+                   multiCamera || !gt.empty() ? " m" : ", unscaled units");
+    }
+    if (!mapPoints.empty()) {
+      // Quality: observations and depth uncertainty of each point, then isolated points (few neighbours).
+      auto percentiles = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return fmt::format("{:.3g} / {:.3g} / {:.3g}", v[v.size() / 10], v[v.size() / 2], v[v.size() * 9 / 10]);
+      };
+      std::vector<double> sigma, obs;
+      for (const auto& p : mapPoints) sigma.push_back(p.relativeDepthSigma), obs.push_back(p.observations);
+      spdlog::info("map points: relative depth sigma {} (10/50/90 %), observations {}", percentiles(sigma),
+                   percentiles(obs));
+      const size_t before = mapPoints.size();
+      std::erase_if(mapPoints, [&](const sdv::MapPoint& p) {
+        return p.observations < minObservations || (maxDepthSigma > 0 && p.relativeDepthSigma > maxDepthSigma);
+      });
+      const size_t afterQuality = mapPoints.size();
+      if (minNeighbours > 0) {
+        // Voxels of the neighbour radius; a point needs minNeighbours others within the radius.
+        const double r = neighbourRadius / alignment.scale;
+        auto key = [&](const Eigen::Vector3d& x) {
+          return std::array<long long, 3>{static_cast<long long>(std::floor(x.x() / r)),
+                                          static_cast<long long>(std::floor(x.y() / r)),
+                                          static_cast<long long>(std::floor(x.z() / r))};
+        };
+        std::map<std::array<long long, 3>, std::vector<size_t>> grid;
+        for (size_t i = 0; i < mapPoints.size(); ++i) grid[key(mapPoints[i].position)].push_back(i);
+        std::vector<char> keep(mapPoints.size(), 0);
+        for (size_t i = 0; i < mapPoints.size(); ++i) {
+          const auto k = key(mapPoints[i].position);
+          int count = 0;
+          for (long long dx = -1; dx <= 1 && count < minNeighbours; ++dx)
+            for (long long dy = -1; dy <= 1 && count < minNeighbours; ++dy)
+              for (long long dz = -1; dz <= 1 && count < minNeighbours; ++dz) {
+                const auto it = grid.find({k[0] + dx, k[1] + dy, k[2] + dz});
+                if (it == grid.end()) continue;
+                for (size_t j : it->second)
+                  if (j != i && (mapPoints[j].position - mapPoints[i].position).norm() < r && ++count >= minNeighbours) break;
+              }
+          keep[i] = count >= minNeighbours;
+        }
+        size_t w = 0;
+        for (size_t i = 0; i < mapPoints.size(); ++i)
+          if (keep[i]) mapPoints[w++] = mapPoints[i];
+        mapPoints.resize(w);
+      }
+      spdlog::info("point filter: {} of {} kept (quality {}, neighbours {})", mapPoints.size(), before, afterQuality,
+                   mapPoints.size());
     }
 
     // Point colours (RGB) from the host camera's input image at the tracked pixel; grey where there is no colour.

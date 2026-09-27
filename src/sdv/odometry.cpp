@@ -390,7 +390,8 @@ MapPoint Odometry::mapPoint(const WindowPoint& p) const {
   const ImageLevel& img = m_window.frame(p.host).images[p.hostCam]->level(0);
   return {m_window.cameraPose(p.host, p.hostCam).inverse() * (p.bearing / p.rho),
           img.interpolateIntensity(static_cast<float>(p.pattern.uv.x()), static_cast<float>(p.pattern.uv.y())),
-          m_keyframeFrameIndex.at(p.host), p.hostCam, p.pattern.uv, 1.0 / p.rho};
+          m_keyframeFrameIndex.at(p.host), p.hostCam, p.pattern.uv, 1.0 / p.rho, p.numGood(),
+          p.hRho > 0 ? 1.0 / (p.rho * std::sqrt(p.hRho)) : std::numeric_limits<double>::infinity()};
 }
 
 void Odometry::marginalize(int keyframeId) {

@@ -52,6 +52,10 @@ struct MapPoint {
   int camera;  // host camera
   Eigen::Vector2d uv;  // pixel in the host camera image
   double distance;  // from the host camera
+  int observations;  // good residuals (other cameras and keyframes)
+  // Inverse-depth standard deviation relative to the inverse depth, for unit photometric noise, from the window
+  // BA depth information (other parameters fixed): a large value means a poorly constrained depth.
+  double relativeDepthSigma;
 };
 
 struct OdometryFrameInfo {
