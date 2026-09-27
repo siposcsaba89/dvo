@@ -22,6 +22,12 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 15 | Loop detection: cross-camera candidates, rig P3P RANSAC, odometry-consistency and temporal checks | no false loops on KITTI 00 / garage / multi-floor |
 | 16 | Pose graph (Ceres, SE3) over keyframes with loop edges; frames and points follow | KITTI 00 full ATE, garage lap consistency |
 | 17 | Global bundle adjustment over all keyframes (optional) | cross-lap geometry |
+| 18 | COLMAP-format export for GS / NeuS (fisheye model fit, thinned dense cloud, masks, exposure); plan in PLAN_NEXT.md | gsplat loads garage and KITTI |
+| 19 | Densify speed (half-resolution pass, candidate cap) and voxel thinning | KITTI densify <= 8 min |
+| 20 | Per-camera consistency check; extrinsic and time-offset refinement in the photometric BA | per-camera pixel consistency |
+| 21 | Full 11-camera rig (4 fisheye, 6 wide, 1 narrow) | all cameras consistent |
+| 22 | GS training and evaluation (gsplat) vs COLMAP | PSNR / SSIM / LPIPS on held-out views |
+| 23 | Metric-aligned monocular depth prior for textureless regions | GS quality vs step 22 |
 
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).

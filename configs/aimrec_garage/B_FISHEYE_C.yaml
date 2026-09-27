@@ -1,0 +1,10 @@
+# B_FISHEYE_C (TE06547), EUCM from sensorconfig
+width: 1936
+height: 1220
+fx: 431.3168
+fy: 431.1828
+cx: 969.7806
+cy: 600.3234
+alpha: 0.5845
+beta: 0.8214
+mask: e:/records/aimrec/aimprototype_config/vehicle_database/VEHICLES/Prodigy/obstruction_masks/B_FISHEYE_C_mask.png
