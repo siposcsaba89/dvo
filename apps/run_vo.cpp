@@ -30,6 +30,7 @@
 #include <sdv/io/ply.h>
 #include <sdv/io/rig_config.h>
 #include <sdv/odometry.h>
+#include <sdv/semi_dense_mapper.h>
 #include <sdv/undistort.h>
 
 namespace po = boost::program_options;
@@ -44,8 +45,12 @@ int main(int argc, char** argv) {
   int minObservations = 1, minNeighbours = 0;
   std::optional<double> camAlpha;
   size_t start = 0, stride = 1, maxFrames = 0;
-  bool verbose = false, trace = false, stereo = false, checkCalibration = false;
+  bool verbose = false, trace = false, stereo = false, checkCalibration = false, densify = false;
   sdv::OdometrySettings settings;
+  sdv::SemiDenseSettings dense;
+  double denseScale = 0.0, denseVoxel = 0.0;
+  std::optional<double> denseMinDepth;
+  int denseHostStride = 0;
 
   po::options_description desc("run_vo options");
   desc.add_options()
@@ -95,6 +100,30 @@ int main(int argc, char** argv) {
       ("cam-alpha", po::value<double>()->notifier([&](double a) { camAlpha = a; }),
        "override the EUCM alpha of the camera(s); a small negative value corrects residual pincushion distortion "
        "of rectified images (KITTI 00: -0.03)")
+      ("map-candidates", po::bool_switch(&settings.mapCandidates),
+       "also map converged candidates that were never activated")
+      ("candidate-interval", po::value(&settings.candidateMaxInterval)->default_value(settings.candidateMaxInterval),
+       "largest relative inverse-depth half interval of mapped candidates")
+      ("densify", po::bool_switch(&densify), "semi-dense mapping pass with the final poses after odometry")
+      ("densify-scale", po::value(&denseScale)->default_value(0.0), "image scale of the densify pass (0 = --scale)")
+      ("densify-points", po::value(&dense.pointsPerImage)->default_value(dense.pointsPerImage),
+       "pixels per host image")
+      ("densify-frames", po::value(&dense.traceFrames)->default_value(dense.traceFrames),
+       "following input frames a host is traced into")
+      ("densify-hosts", po::value(&denseHostStride)->default_value(0),
+       "host images: 0 = keyframes, n = every n-th frame")
+      ("densify-min-depth", po::value<double>()->notifier([&](double d) { denseMinDepth = d; }),
+       "initial search range, world units (default: 0.5 with metric scale, else 0.1 x median map point distance)")
+      ("densify-min-good", po::value(&dense.minGood)->default_value(dense.minGood), "good matches a point needs")
+      ("densify-interval", po::value(&dense.maxInterval)->default_value(dense.maxInterval),
+       "largest relative inverse-depth half interval")
+      ("densify-outliers", po::value(&dense.maxOutlierRatio)->default_value(dense.maxOutlierRatio),
+       "largest ratio of outlier to good traces")
+      ("densify-voxel", po::value(&denseVoxel)->default_value(0.0),
+       "voxel size of the multi-view consistency check, metres after alignment (0 = off)")
+      ("densify-voxel-hosts", po::value(&dense.minVoxelHosts)->default_value(dense.minVoxelHosts),
+       "host images whose points a voxel must contain")
+      ("densify-thin", po::bool_switch(&dense.thin), "keep one point per voxel")
       ("check-calibration", po::bool_switch(&checkCalibration),
        "several cameras: log the temporal vs static depth bias per image radius at every keyframe")
       ("trace", po::bool_switch(&trace), "trace logging (implies verbose)")
@@ -123,23 +152,26 @@ int main(int argc, char** argv) {
     // One entry per rig camera: prepared camera, extrinsic and input stream.
     struct InputCamera {
       std::string name;
+      sdv::CameraConfig config;
       sdv::Camera camera;
       Sophus::SE3d T_c_b;
       std::unique_ptr<sdv::SubsampledSource> source;
     };
     std::vector<InputCamera> inputs;
     const int sizeMultiple = 1 << (settings.levels - 1);
-    auto prepare = [&](sdv::CameraConfig config) {
+    auto withAlpha = [&](sdv::CameraConfig config) {
       if (camAlpha) config.camera.alpha = *camAlpha;
-      return sdv::prepareCamera(config, scale, sizeMultiple);
+      return config;
     };
+    auto prepare = [&](const sdv::CameraConfig& config) { return sdv::prepareCamera(config, scale, sizeMultiple); };
     std::optional<sdv::KittiSequence> kitti;
     if (!rigFile.empty()) {
       const sdv::RigConfig rigConfig = sdv::loadRigConfig(rigFile);
       for (const auto& c : rigConfig.cameras) {
         if (!rigCameras.empty() && std::find(rigCameras.begin(), rigCameras.end(), c.name) == rigCameras.end()) continue;
         if (c.video.empty()) throw std::invalid_argument("rig camera " + c.name + " has no video");
-        inputs.push_back({c.name, prepare(c.camera), c.T_b_c.inverse(),
+        const sdv::CameraConfig config = withAlpha(c.camera);
+        inputs.push_back({c.name, config, prepare(config), c.T_b_c.inverse(),
                           std::make_unique<sdv::SubsampledSource>(std::make_unique<sdv::VideoSource>(c.video),
                                                                   start + c.frameOffset, stride)});
       }
@@ -158,11 +190,13 @@ int main(int argc, char** argv) {
       }
       if (!cameraFile.empty()) config = sdv::loadCameraConfig(cameraFile);
       else if (!kitti) throw std::invalid_argument("--video and --images need --camera");
+      config = withAlpha(config);
       const sdv::Camera camera = prepare(config);
-      inputs.push_back({"cam0", camera, Sophus::SE3d(), std::make_unique<sdv::SubsampledSource>(std::move(source), start, stride)});
+      inputs.push_back({"cam0", config, camera, Sophus::SE3d(),
+                        std::make_unique<sdv::SubsampledSource>(std::move(source), start, stride)});
       if (stereo) {
         // KITTI: the body frame is the left camera frame, so poses stay camera-0 poses for the ground truth.
-        inputs.push_back({"cam1", camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)),
+        inputs.push_back({"cam1", config, camera, Sophus::SE3d(Sophus::SO3d(), Eigen::Vector3d(-kitti->baseline(), 0, 0)),
                           std::make_unique<sdv::SubsampledSource>(std::make_unique<sdv::KittiSource>(*kitti, 1), start,
                                                                   stride)});
       }
@@ -305,6 +339,58 @@ int main(int argc, char** argv) {
 
     // A few points close to infinity would dominate any viewer; limit by distance from their host camera.
     std::vector<sdv::MapPoint> mapPoints = vo.mapPoints();
+    if (densify) {
+      const double s = denseScale > 0 ? denseScale : scale;
+      sdv::Rig denseRig;
+      for (const auto& in : inputs) {
+        denseRig.cameras.push_back(sdv::prepareCamera(in.config, s, 1));
+        denseRig.T_c_b.push_back(in.T_c_b);
+      }
+      if (denseMinDepth) {
+        dense.minDepth = *denseMinDepth;
+      } else if (multiCamera) {
+        dense.minDepth = 0.5;
+      } else if (!mapPoints.empty()) {
+        std::vector<double> d;
+        for (const auto& p : mapPoints) d.push_back(p.distance);
+        std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+        dense.minDepth = 0.1 * d[d.size() / 2];
+      }
+      dense.voxelSize = denseVoxel / alignment.scale;
+      const auto brightness = vo.brightness();
+      const auto kfs = vo.keyframeIndices();
+      sdv::SemiDenseMapper mapper(denseRig, dense);
+      for (auto& in : inputs) in.source->rewind();
+      const auto t0 = Clock::now();
+      size_t processed = 0;
+      for (size_t i = 0; i < poses.size(); ++i) {
+        std::vector<cv::Mat> images;
+        for (int c = 0; c < rig.size(); ++c) {
+          const cv::Mat input = inputs[c].source->next();
+          if (input.empty()) break;
+          images.push_back(sdv::prepareImage(input, s, denseRig.cameras[c]));
+        }
+        if (static_cast<int>(images.size()) != rig.size()) break;
+        if (!poses[i] || brightness[i].empty()) continue;
+        const bool host = denseHostStride > 0 ? i % denseHostStride == 0
+                                              : std::find(kfs.begin(), kfs.end(), static_cast<int>(i)) != kfs.end();
+        mapper.addFrame(static_cast<int>(i), images, *poses[i], brightness[i], host);
+        if (++processed % 200 == 0) spdlog::info("densify: {} frames", processed);
+      }
+      std::vector<sdv::MapPoint> densePoints = mapper.finish();
+      const auto& st = mapper.stats();
+      spdlog::info("densify at scale {:.2f}: {:.0f} ms/frame, {} candidates, {:.1f} good traces per candidate, {} "
+                   "accepted (rejected: {} too few matches, {} imprecise), {} after voxel merge",
+                   s, std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / std::max<size_t>(processed, 1),
+                   st.candidates, static_cast<double>(st.good) / std::max<long long>(st.candidates, 1), st.accepted,
+                   st.rejectMatches, st.rejectInterval, densePoints.size());
+      mapPoints.insert(mapPoints.end(), densePoints.begin(), densePoints.end());
+    }
+    {
+      std::array<size_t, 3> count{};
+      for (const auto& p : mapPoints) ++count[static_cast<int>(p.source)];
+      spdlog::info("map points: {} active, {} candidates, {} semi-dense", count[0], count[1], count[2]);
+    }
     if (!mapPoints.empty()) {
       std::vector<double> distances;
       for (const auto& p : mapPoints) distances.push_back(p.distance);
@@ -325,13 +411,18 @@ int main(int argc, char** argv) {
         std::sort(v.begin(), v.end());
         return fmt::format("{:.3g} / {:.3g} / {:.3g}", v[v.size() / 10], v[v.size() / 2], v[v.size() * 9 / 10]);
       };
+      // Candidates and semi-dense points were already accepted by their own criteria.
+      auto active = [](const sdv::MapPoint& p) { return p.source == sdv::MapPointSource::Active; };
       std::vector<double> sigma, obs;
-      for (const auto& p : mapPoints) sigma.push_back(p.relativeDepthSigma), obs.push_back(p.observations);
-      spdlog::info("map points: relative depth sigma {} (10/50/90 %), observations {}", percentiles(sigma),
-                   percentiles(obs));
+      for (const auto& p : mapPoints)
+        if (active(p)) sigma.push_back(p.relativeDepthSigma), obs.push_back(p.observations);
+      if (!sigma.empty())
+        spdlog::info("active points: relative depth sigma {} (10/50/90 %), observations {}", percentiles(sigma),
+                     percentiles(obs));
       const size_t before = mapPoints.size();
       std::erase_if(mapPoints, [&](const sdv::MapPoint& p) {
-        return p.observations < minObservations || (maxDepthSigma > 0 && p.relativeDepthSigma > maxDepthSigma);
+        return active(p) &&
+               (p.observations < minObservations || (maxDepthSigma > 0 && p.relativeDepthSigma > maxDepthSigma));
       });
       const size_t afterQuality = mapPoints.size();
       if (minNeighbours > 0) {
@@ -369,11 +460,14 @@ int main(int argc, char** argv) {
 
     // Point colours (RGB) from the host camera's input image at the tracked pixel; grey where there is no colour.
     std::vector<std::array<std::uint8_t, 3>> pointColors(mapPoints.size());
-    for (size_t i = 0; i < mapPoints.size(); ++i)
-      pointColors[i].fill(static_cast<std::uint8_t>(std::clamp(mapPoints[i].intensity, 0.f, 255.f)));
+    for (size_t i = 0; i < mapPoints.size(); ++i) {
+      if (mapPoints[i].color) pointColors[i] = *mapPoints[i].color;
+      else pointColors[i].fill(static_cast<std::uint8_t>(std::clamp(mapPoints[i].intensity, 0.f, 255.f)));
+    }
     if (!plyFile.empty() || !colmapDir.empty()) {
       std::map<std::pair<int, int>, std::vector<size_t>> pointsOfImage;  // (frame, camera)
-      for (size_t i = 0; i < mapPoints.size(); ++i) pointsOfImage[{mapPoints[i].frameIndex, mapPoints[i].camera}].push_back(i);
+      for (size_t i = 0; i < mapPoints.size(); ++i)
+        if (!mapPoints[i].color) pointsOfImage[{mapPoints[i].frameIndex, mapPoints[i].camera}].push_back(i);
       for (auto& in : inputs) in.source->rewind();
       const int lastFrame = pointsOfImage.empty() ? -1 : pointsOfImage.rbegin()->first.first;
       for (int frame = 0; frame <= lastFrame; ++frame) {

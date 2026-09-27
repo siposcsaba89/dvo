@@ -29,8 +29,11 @@ add_library(sdv STATIC
   src/sdv/immature_point.cpp
   src/sdv/mono_initializer.h
   src/sdv/mono_initializer.cpp
+  src/sdv/map_point.h
   src/sdv/odometry.h
   src/sdv/odometry.cpp
+  src/sdv/semi_dense_mapper.h
+  src/sdv/semi_dense_mapper.cpp
   src/sdv/parallel.h
   src/sdv/photometric.h
   src/sdv/photometric.cpp
@@ -97,6 +100,9 @@ target_link_libraries(estimate_sync PRIVATE sdv Boost::program_options)
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
 
+add_executable(render_cloud apps/render_cloud.cpp)
+target_link_libraries(render_cloud PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
@@ -110,6 +116,7 @@ add_executable(sdv_tests
   tests/test_ply.cpp
   tests/test_point_selector.cpp
   tests/test_pyramid.cpp
+  tests/test_semi_dense_mapper.cpp
   tests/test_tracker.cpp
   tests/test_trajectory.cpp
   tests/test_window_optimizer.cpp

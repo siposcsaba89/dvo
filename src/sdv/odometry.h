@@ -11,6 +11,7 @@
 
 #include <sdv/camera.h>
 #include <sdv/immature_point.h>
+#include <sdv/map_point.h>
 #include <sdv/mono_initializer.h>
 #include <sdv/point_selector.h>
 #include <sdv/profiler.h>
@@ -43,19 +44,10 @@ struct OdometrySettings {
   double stereoMinDepth = 1.5;  // bounds the initial search range between cameras of one keyframe
   int stereoMaxSamples = 400;
   bool checkCalibration = false;  // multi-camera: log the temporal vs static depth bias at every keyframe
-};
-
-struct MapPoint {
-  Eigen::Vector3d position;  // world
-  float intensity;
-  int frameIndex;  // input frame of the host keyframe
-  int camera;  // host camera
-  Eigen::Vector2d uv;  // pixel in the host camera image
-  double distance;  // from the host camera
-  int observations;  // good residuals (other cameras and keyframes)
-  // Inverse-depth standard deviation relative to the inverse depth, for unit photometric noise, from the window
-  // BA depth information (other parameters fixed): a large value means a poorly constrained depth.
-  double relativeDepthSigma;
+  // Converged candidates that were never activated also become map points when their keyframe leaves the window.
+  bool mapCandidates = false;
+  int candidateMinGood = 2;
+  double candidateMaxInterval = 0.05;  // half width of the inverse-depth interval relative to the inverse depth
 };
 
 struct OdometryFrameInfo {
@@ -82,7 +74,9 @@ class Odometry {
   bool initialized() const { return m_initialized; }
   // T_w_b per input frame, final estimates; empty for frames before initialisation.
   std::vector<std::optional<Sophus::SE3d>> poses() const;
-  // Marginalised points plus the active points still in the window.
+  // Affine brightness per camera and input frame: keyframes from the window, other frames from tracking.
+  std::vector<std::vector<AffineBrightness>> brightness() const;
+  // Marginalised points plus the active points still in the window (and converged candidates, see mapCandidates).
   std::vector<MapPoint> mapPoints() const;
   std::vector<int> keyframeIndices() const;
   const Rig& rig() const { return m_rig; }
@@ -98,6 +92,7 @@ class Odometry {
   struct FrameRecord {
     int keyframe = -1;  // optimizer frame id of the reference keyframe
     Sophus::SE3d T_f_kf;  // body
+    std::vector<AffineBrightness> affine;  // tracked frames
   };
 
   bool multiCamera() const { return m_rig.size() > 1; }
@@ -117,6 +112,7 @@ class Odometry {
   double translationFlow(const Sophus::SE3d& T_f_ref) const;
   void storeKeyframePoses();
   MapPoint mapPoint(const WindowPoint& p) const;
+  void appendCandidatePoints(int keyframeId, std::vector<MapPoint>& out) const;
 
   Rig m_rig;
   OdometrySettings m_settings;
@@ -132,6 +128,7 @@ class Odometry {
 
   std::map<int, Keyframe> m_keyframes;  // by optimizer frame id, window only
   std::map<int, Sophus::SE3d> m_keyframePoses;  // T_b_w, latest estimate, also marginalised ones
+  std::map<int, std::vector<AffineBrightness>> m_keyframeAffine;
   std::map<int, int> m_keyframeFrameIndex;
   std::vector<FrameRecord> m_frames;
   std::vector<MapPoint> m_marginalizedPoints;

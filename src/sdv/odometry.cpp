@@ -87,7 +87,7 @@ OdometryFrameInfo Odometry::addFrame(const std::vector<cv::Mat>& images) {
   m_T_prev_prevprev = res.T_t_h * m_T_prev_ref.inverse();
   m_T_prev_ref = res.T_t_h;
   m_lastAffine = res.affine;
-  m_frames.back() = {m_referenceId, res.T_t_h};
+  m_frames.back() = {m_referenceId, res.T_t_h, res.affine};
   if (m_referenceRmse < 0) m_referenceRmse = res.rmse;
 
   const Sophus::SE3d T_b_w = res.T_t_h * m_window.frame(m_referenceId).params.T_b_w;
@@ -394,10 +394,32 @@ MapPoint Odometry::mapPoint(const WindowPoint& p) const {
           p.hRho > 0 ? 1.0 / (p.rho * std::sqrt(p.hRho)) : std::numeric_limits<double>::infinity()};
 }
 
+void Odometry::appendCandidatePoints(int keyframeId, std::vector<MapPoint>& out) const {
+  if (!m_settings.mapCandidates) return;
+  const Keyframe& kf = m_keyframes.at(keyframeId);
+  for (int c = 0; c < m_rig.size(); ++c) {
+    const Sophus::SE3d T_w_c = m_window.cameraPose(keyframeId, c).inverse();
+    const ImageLevel& img = kf.images[c]->level(0);
+    for (const auto& p : kf.immature[c]) {
+      const double rho = p.rho();
+      if (p.numGood() < m_settings.candidateMinGood || rho <= kMinMapRho || rho < p.rhoMin() || rho > p.rhoMax())
+        continue;
+      const double interval = 0.5 * (p.rhoMax() - p.rhoMin()) / rho;
+      if (interval > m_settings.candidateMaxInterval) continue;
+      const Eigen::Vector2d& uv = p.pattern().uv;
+      out.push_back({T_w_c * (p.bearing() / rho),
+                     img.interpolateIntensity(static_cast<float>(uv.x()), static_cast<float>(uv.y())), kf.frameIndex,
+                     c, uv, 1.0 / rho, p.numGood(), interval, MapPointSource::Candidate});
+    }
+  }
+}
+
 void Odometry::marginalize(int keyframeId) {
   for (const auto& p : m_window.points())
     if (p.host == keyframeId && p.numGood() > 0 && p.rho > kMinMapRho) m_marginalizedPoints.push_back(mapPoint(p));
+  appendCandidatePoints(keyframeId, m_marginalizedPoints);
   m_keyframePoses[keyframeId] = m_window.frame(keyframeId).params.T_b_w;
+  m_keyframeAffine[keyframeId] = m_window.frame(keyframeId).params.affine;
   m_window.marginalizeFrame(keyframeId);
   m_keyframes.erase(keyframeId);
 }
@@ -467,6 +489,19 @@ std::vector<MapPoint> Odometry::mapPoints() const {
   std::vector<MapPoint> out = m_marginalizedPoints;
   for (const auto& p : m_window.points())
     if (p.numGood() > 0 && p.rho > kMinMapRho) out.push_back(mapPoint(p));
+  for (const auto& [id, kf] : m_keyframes) appendCandidatePoints(id, out);
+  return out;
+}
+
+std::vector<std::vector<AffineBrightness>> Odometry::brightness() const {
+  std::map<int, std::vector<AffineBrightness>> keyframe = m_keyframeAffine;
+  for (const auto& f : m_window.frames()) keyframe[f.id] = f.params.affine;
+  std::vector<std::vector<AffineBrightness>> out;
+  for (const auto& r : m_frames) {
+    if (r.keyframe < 0) out.emplace_back();
+    else if (r.affine.empty()) out.push_back(keyframe.at(r.keyframe));
+    else out.push_back(r.affine);
+  }
   return out;
 }
 

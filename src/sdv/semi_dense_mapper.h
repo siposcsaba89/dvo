@@ -1,0 +1,80 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <vector>
+
+#include <opencv2/core.hpp>
+#include <sophus/se3.hpp>
+
+#include <sdv/immature_point.h>
+#include <sdv/map_point.h>
+#include <sdv/point_selector.h>
+#include <sdv/rig.h>
+
+namespace sdv {
+
+struct SemiDenseSettings {
+  int pointsPerImage = 20000;
+  int traceFrames = 30;  // a host is traced into the images of this many following input frames
+  double minDepth = 0.5;  // initial search range
+  int minGood = 3;
+  double maxOutlierRatio = 0.2;  // outlier traces per good trace
+  double maxInterval = 0.02;  // half width of the inverse-depth interval relative to the inverse depth
+  // Multi-view consistency: points count per voxel of this size (world units); 0 = off.
+  double voxelSize = 0.0;
+  int minVoxelHosts = 1;  // a point is kept when its voxel holds points of this many different host images
+  bool thin = false;  // keep only the most precise point per voxel
+  TraceSettings trace;
+};
+
+// Semi-dense depth from known poses: every host image contributes many high-gradient pixels whose inverse-depth
+// interval is narrowed by epipolar tracing into the other cameras of the same frame and into all cameras of the
+// following frames, with the photometric error model of the odometry. No optimisation: poses and brightness are
+// taken as given, so this runs after odometry has finished.
+class SemiDenseMapper {
+ public:
+  SemiDenseMapper(const Rig& rig, SemiDenseSettings settings = {});
+
+  // Frames in input order. images: prepared for the rig cameras (grey or BGR); T_w_b: final body pose; affine:
+  // brightness per camera; host: whether this frame's images get new points (e.g. keyframes).
+  void addFrame(int frameIndex, const std::vector<cv::Mat>& images, const Sophus::SE3d& T_w_b,
+                const std::vector<AffineBrightness>& affine, bool host);
+  std::vector<MapPoint> finish();
+
+  struct Stats {
+    long long traces = 0, good = 0, candidates = 0, accepted = 0, merged = 0;
+    long long rejectMatches = 0, rejectInterval = 0;
+  };
+  const Stats& stats() const { return m_stats; }
+
+ private:
+  struct Host {
+    int frameIndex;
+    int camera;
+    Sophus::SE3d T_c_w;
+    AffineBrightness affine;
+    std::vector<ImmaturePoint> points;
+    std::vector<float> intensity;
+    std::vector<std::array<std::uint8_t, 3>> color;
+    bool hasColor;
+  };
+
+  void createHosts(int frameIndex, const std::vector<cv::Mat>& images,
+                   const std::vector<std::shared_ptr<const ImagePyramid>>& pyr, const std::vector<Sophus::SE3d>& T_c_w,
+                   const std::vector<AffineBrightness>& affine);
+  void traceInto(Host& h, int camera, const ImageLevel& img, const Sophus::SE3d& T_c_w, const AffineBrightness& affine,
+                 bool requireVisible);
+  void close(Host& h);
+
+  Rig m_rig;
+  SemiDenseSettings m_settings;
+  PointSelector m_selector;
+  std::deque<Host> m_hosts;
+  std::vector<MapPoint> m_points;
+  Stats m_stats;
+};
+
+}  // namespace sdv

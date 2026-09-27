@@ -17,6 +17,7 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 10 | Performance: multithreading, SIMD (done: multithreading, see log) | real-time on KITTI |
 | 11 | Tuning pass once the full pipeline runs (items below) | KITTI ATE / drift, point accuracy |
 | 12 | Multi-camera rig: body poses, per-camera brightness, cross-camera residuals, rig YAML, multi-camera export | KITTI stereo as a 2-camera rig; synthetic surround rig metric; own rig |
+| 13 | Denser point clouds: converged candidates as map points; semi-dense mapping pass with the final poses | synthetic depth accuracy; Prodigy garage |
 
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
@@ -150,3 +151,20 @@ id, obstruction masks); `estimate_sync` found M_FISHEYE_L one frame late (fast b
 single-camera runs, cross-correlated). 1885 frames (75 s, 155 m, underground garage): all frames posed from the
 first one, no weak tracking, 77 ms/frame, 195k coloured points; height stays within 0.2 m. Static vs temporal depth
 bias +-0.06 % across the image radius: the sensorconfig calibration is consistent.
+
+## Step 13 log
+
+- Converged candidates (`--map-candidates`): candidates that were never activated become map points when their
+  keyframe leaves the window, if they have 2+ good traces and a relative inverse-depth half interval below 5 %.
+- Semi-dense pass (`--densify`, `SemiDenseMapper`): after odometry, with the final poses and per-frame brightness,
+  every keyframe image hosts ~20k high-gradient pixels (region-adaptive selector). Each is traced into the other
+  cameras of its frame and into all cameras of the following 30 frames (other cameras only where the current depth
+  projects inside). Accepted with 3+ good traces, outliers <= 20 % of them, and a relative half interval <= 2 %.
+  Tracing only searches inside the current interval, so a wrong first match can confirm itself; the multi-view check
+  (`--densify-voxel 0.05 --densify-voxel-hosts 2`: a point needs points of another host image in its 5 cm voxel)
+  removes most of those. Edges along the epipolar line stay unconstrained in one pair but not in another (cameras
+  and frames give different epipolar directions).
+- Synthetic surround room: median depth error < 0.5 %, 95 % < 3 %.
+- Prodigy garage, lap 1 (850 frames, F/L/B fisheyes, half resolution): 73k active + 105k candidate + 374k semi-dense
+  points, 493k after filtering (27k before). Densify pass ~200 ms/frame. Remaining: some haze at the ceiling,
+  textureless floor stays empty, no dynamic-object masks yet. `render_cloud` renders a PLY view to PNG.
