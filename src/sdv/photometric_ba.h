@@ -18,6 +18,12 @@ struct PhotometricBASettings {
   int maxPointsPerImage = 0;  // evenly subsample the hosted points of each keyframe image (0 = all)
   int neighbours = 5;  // each point is observed in the keyframes this many before and after its host
   int loopNeighbours = 2;  // ... and in these around the keyframes its host is linked to by a loop
+  // ... and in the closest keyframes within this distance of its host that are not temporal neighbours (revisits;
+  // the pose graph has aligned them already): up to spatialTargets of them.
+  double spatialRadius = 6.0;
+  int spatialTargets = 8;
+  int maxCrossTargets = 8;  // loop and revisit target keyframes per point, the closest to its host (0 = all); memory
+  double crossMaxInitialPixelError = 30.0;  // initial check for these revisit residuals
   double maxViewAngleDeg = 40.0;  // host and target rays of a point
   double maxInitialPixelError = 20.0;  // initial photometric error per pattern pixel for a residual to be used
   int minInitialResiduals = 3;  // a point takes part only with this many residuals that pass the initial check

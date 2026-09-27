@@ -114,6 +114,12 @@ int main(int argc, char** argv) {
       ("pba-iterations", po::value(&pbaSettings.iterations)->default_value(pbaSettings.iterations), "iterations per round")
       ("pba-points", po::value(&pbaSettings.maxPointsPerImage)->default_value(pbaSettings.maxPointsPerImage),
        "map points per keyframe image (0 = all)")
+      ("pba-spatial-radius", po::value(&pbaSettings.spatialRadius)->default_value(pbaSettings.spatialRadius),
+       "revisit keyframes within this distance of the host are observation targets, m (0 = off)")
+      ("pba-spatial-targets", po::value(&pbaSettings.spatialTargets)->default_value(pbaSettings.spatialTargets),
+       "closest revisit keyframes per host")
+      ("pba-cross-targets", po::value(&pbaSettings.maxCrossTargets)->default_value(pbaSettings.maxCrossTargets),
+       "loop and revisit target keyframes per point, the closest (0 = all)")
       ("pba-odometry-factor", po::value(&pbaSettings.odometrySigmaFactor)->default_value(pbaSettings.odometrySigmaFactor),
        "odometry edge sigma factor (0 = off)")
       ("ply", po::value(&plyFile), "write corrected keyframe trajectory and bundle-adjusted points")
@@ -223,13 +229,20 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < poses.size(); ++i) gt.push_back(allGt.at(static_cast<size_t>(start) + i * stride));
       auto report = [&](const char* name, const std::vector<Sophus::SE3d>& ps) {
         const auto a = sdv::absoluteTrajectoryError(gt, ps, false);
-        const auto seg = sdv::segmentDriftError(gt, [&] {
-          auto aligned = ps;
-          for (auto& p : aligned) p = a.alignment.applyToPose(p);
-          return aligned;
-        }());
-        spdlog::info("{:<12} ATE SE3 rmse {:.3f} m, max {:.3f} m | drift t {:.2f} % r {:.3f} deg/100m", name, a.rmse,
-                     a.max, seg.translationPercent, seg.rotationDegPer100m);
+        auto aligned = ps;
+        for (auto& p : aligned) p = a.alignment.applyToPose(p);
+        const auto seg = sdv::segmentDriftError(gt, aligned);
+        // Split into horizontal and vertical: GPS/INS ground truth heights are the weak part (step 15).
+        double sh = 0, sv = 0;
+        for (size_t i = 0; i < gt.size(); ++i) {
+          const Eigen::Vector3d e = aligned[i].translation() - gt[i].translation();
+          const double v = e.dot(loopSettings.up);
+          sv += v * v, sh += e.squaredNorm() - v * v;
+        }
+        spdlog::info("{:<12} ATE SE3 rmse {:.3f} m (horizontal {:.3f}, vertical {:.3f}), max {:.3f} m | drift t {:.2f} "
+                     "% r {:.3f} deg/100m",
+                     name, a.rmse, std::sqrt(sh / gt.size()), std::sqrt(sv / gt.size()), a.max, seg.translationPercent,
+                     seg.rotationDegPer100m);
       };
       report("odometry", uncorrected);
       report("pose graph", correct(graph.T_w_b));

@@ -12,6 +12,7 @@
 #include <thread>
 
 #include <ceres/ceres.h>
+#include <spdlog/spdlog.h>
 
 #include <sdv/image_pyramid.h>
 #include <sdv/photometric_ba_cost.h>
@@ -69,6 +70,18 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
 
   std::vector<std::set<int>> partners(nk);
   for (const auto& [q, m] : loopPairs) partners[q].insert(m), partners[m].insert(q);
+  std::vector<std::set<int>> spatial(nk);
+  for (int h = 0; h < nk; ++h) {
+    std::vector<std::pair<double, int>> near;
+    for (int t = 0; t < nk; ++t) {
+      if (std::abs(t - h) <= settings.neighbours) continue;
+      const double d = (initial_T_w_b[t].translation() - initial_T_w_b[h].translation()).norm();
+      if (d <= settings.spatialRadius) near.emplace_back(d, t);
+    }
+    std::sort(near.begin(), near.end());
+    for (size_t i = 0; i < near.size() && i < static_cast<size_t>(settings.spatialTargets); ++i)
+      spatial[h].insert(near[i].second);
+  }
 
   std::vector<std::array<double, 7>> poses(nk);
   for (int k = 0; k < nk; ++k) std::copy_n(initial_T_w_b[k].data(), 7, poses[k].data());
@@ -94,6 +107,16 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     for (int m : partners[p.host])
       for (int t = std::max(0, m - settings.loopNeighbours); t <= std::min(nk - 1, m + settings.loopNeighbours); ++t)
         if (!targets.count(t)) loopTargets.insert(t);
+    for (int t : spatial[p.host])
+      if (!targets.count(t)) loopTargets.insert(t);
+    if (settings.maxCrossTargets > 0 && static_cast<int>(loopTargets.size()) > settings.maxCrossTargets) {
+      std::vector<std::pair<double, int>> byDistance;
+      for (int t : loopTargets)
+        byDistance.emplace_back((initial_T_w_b[t].translation() - initial_T_w_b[p.host].translation()).norm(), t);
+      std::sort(byDistance.begin(), byDistance.end());
+      loopTargets.clear();
+      for (int i = 0; i < settings.maxCrossTargets; ++i) loopTargets.insert(byDistance[i].second);
+    }
     const Sophus::SE3d T_w_ch = initial_T_w_b[p.host] * rig.T_c_b[p.hostCam].inverse();
     const Eigen::Vector3d X = T_w_ch * (p.bearing / rho[pi]);
     auto consider = [&](int t, bool loop) {
@@ -111,7 +134,8 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
                         affine[p.host * nc + p.hostCam].data(), affine[t * nc + tc].data(), r);
         double sq = 0;
         for (double v : r) sq += v * v;
-        if (std::sqrt(sq / kPatternSize) > settings.maxInitialPixelError) continue;
+        if (std::sqrt(sq / kPatternSize) > (loop ? settings.crossMaxInitialPixelError : settings.maxInitialPixelError))
+          continue;
         perPoint[pi].push_back({static_cast<int>(pi), t, tc, loop});
       }
     };
@@ -121,6 +145,10 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     // later as an outlier, after costing time.
     if (static_cast<int>(perPoint[pi].size()) < settings.minInitialResiduals) perPoint[pi].clear();
   });
+
+  size_t candidates = 0;
+  for (const auto& list : perPoint) candidates += list.size();
+  spdlog::info("photometric bundle adjustment: {} points, {} candidate residuals", points.size(), candidates);
 
   ceres::Problem::Options problemOptions;
   problemOptions.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;

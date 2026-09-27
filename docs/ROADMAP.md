@@ -273,3 +273,11 @@ the BA each point gets its relative depth sigma from the depth information of it
 0.00019 / 0.00055 / 0.0024, as run_vo's active points), and close_loops writes the PLY with run_vo's filter (distance,
 3+ residuals, depth sigma, 3+ neighbours within 0.2 m; `point_filter` shared with run_vo). Garage, same filter:
 odometry only 57.8k points pass, pose graph 59.6k, photometric BA 72.3k (+21 %: more points consistent across images).
+
+Follow-up (step 17): denser cross-lap coupling. Besides the keyframes around loop partners, each point is also observed
+in the closest keyframes within 6 m of its host that are not temporal neighbours (revisits, aligned by the pose graph),
+capped at 8 cross targets per point (closest first; without the cap KITTI at 150 points/image ran out of 32 GB).
+Garage: 933k residuals, 194k across laps (was 55k), rmse 13.8 -> 7.3, 168 s, 75.9k points pass the filter. KITTI
+(100 points/image): 4.29M residuals, 88k across loops, 673 s; ATE odometry 3.95 m (horizontal 2.02, vertical 3.39),
+pose graph 0.893 (0.774 / 0.446), photometric BA 0.948 (0.828 / 0.461; was 1.005). Still not below the pose graph on
+KITTI, whose ground truth is itself inconsistent at this level; the BA stays optional.
