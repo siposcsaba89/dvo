@@ -161,10 +161,12 @@ int main(int argc, char** argv) {
 
     const auto poses = vo.poses();
     std::vector<Sophus::SE3d> est, gt;
+    std::vector<int> estFrame;  // input frame (0-based within the run) of each estimate
     const auto allGt = gtFile.empty() ? std::vector<Sophus::SE3d>{} : sdv::loadKittiPoses(gtFile);
     for (size_t i = 0; i < poses.size(); ++i) {
       if (!poses[i] || (!allGt.empty() && frameIndex(i) >= allGt.size())) continue;
       est.push_back(*poses[i]);
+      estFrame.push_back(static_cast<int>(i));
       if (!allGt.empty()) gt.push_back(allGt[frameIndex(i)]);
     }
     spdlog::info("{} of {} frames have a pose", est.size(), poses.size());
@@ -208,6 +210,27 @@ int main(int argc, char** argv) {
       const auto rpe = sdv::relativePoseError(gt, est, 1, alignment.scale);
       spdlog::info("RPE 1 frame: rmse {:.2f} cm, {:.4f} deg ({} pairs)", 100 * rpe.translationRmse, rpe.rotationRmseDeg,
                    rpe.numPairs);
+      {
+        // Split by whether a pair involves a tracked (non-key) frame.
+        const auto kfs = vo.keyframeIndices();
+        auto isKf = [&](int f) { return std::find(kfs.begin(), kfs.end(), f) != kfs.end(); };
+        std::vector<double> errs[2];
+        for (size_t k = 0; k + 1 < est.size(); ++k) {
+          if (estFrame[k + 1] != estFrame[k] + 1) continue;
+          const Sophus::SO3d err = (gt[k].so3().inverse() * gt[k + 1].so3()).inverse() * (est[k].so3().inverse() * est[k + 1].so3());
+          const double deg = err.logAndTheta().theta * 180.0 / M_PI;
+          const int tracked = !(isKf(estFrame[k]) && isKf(estFrame[k + 1]));
+          errs[tracked].push_back(deg);
+        }
+        // Median: KITTI ground truth has interpolated gaps (e.g. frames 2275-2290) that dominate an RMS.
+        auto median = [](std::vector<double> v) {
+          if (v.empty()) return 0.0;
+          std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+          return v[v.size() / 2];
+        };
+        spdlog::info("RPE rotation median: keyframe pairs {:.4f} deg ({}), pairs with a tracked frame {:.4f} deg ({})",
+                     median(errs[0]), errs[0].size(), median(errs[1]), errs[1].size());
+      }
       metrics += fmt::format(R"(,"rpeT":{:.4f},"rpeR":{:.5f})", rpe.translationRmse, rpe.rotationRmseDeg);
       spdlog::info("ATE Sim3 rmse {:.3f} m, max {:.3f} m, scale {:.3f} over {:.0f} m | drift t {:.2f} % "
                    "r {:.3f} deg/100m ({} segments)",

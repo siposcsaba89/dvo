@@ -20,7 +20,7 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
 - Immature points: high outlier / ambiguous rates, error bound too optimistic (stereo inside interval only 29 %).
-- Fisheye validity mask and YAML camera config for non-KITTI data.
+- Fisheye validity mask and YAML camera config for non-KITTI data (done: ValidityMask, --camera, --video).
 - Window BA on KITTI turns (frames 100-160): monocular scale shrinks ~1.5 % per keyframe relative to stereo
   (Sim3 scale 0.93 over 100 frames); not reproduced synthetically, not caused by marginalisation, FEJ, window
   size, point count or image periphery. Revisit after point management (step 7) and stereo residuals (step 9).
@@ -78,3 +78,15 @@ Mono scale drift root cause: every window BA moved existing points ~0.7 % farthe
 
 Full-sequence mono with the safeguard: alpha 0: 39 % / 1.93, alpha -0.03: 6.4 % / 0.281, alpha -0.035: 1.15 % /
 0.288 with ATE Sim3 6.9 m and local scale within +-5 % over 3.7 km; alpha -0.04 reverses the drift.
+
+Frame-to-frame accuracy (relative pose error, 1 frame): RMS 2.9 cm / 0.072 deg on four 300-frame segments, but the
+RMS is dominated by the ground truth: KITTI 00 frames 2275-2290 are linearly interpolated (constant 0.274 deg/frame
+yaw, constant 0.77 m steps) while the estimate follows the real motion. Median rotation error per frame is
+0.03-0.04 deg for keyframe pairs and pairs with a tracked frame alike (mono and stereo), i.e. tracked frames are
+not worse than keyframes and the error is near the ground-truth noise. A tracked-frame refinement was therefore not
+implemented; revisit only with better ground truth (synthetic or survey-grade).
+
+Own data (step 11 inputs): `run_vo --video file.h264 --camera cam.yaml --scale 0.5` with an EUCM YAML and an
+obstruction mask (config/camera_example.yaml). aiMotive front fisheye, underground garage, 1886 frames at 960x608:
+1826 posed (the first 60 are before monocular initialisation), 248 keyframes, 72.6k points, ~90 ms/frame, no weak
+tracking. No ground truth; open: calibration pixel-centre convention, metric scale from the camera height.
