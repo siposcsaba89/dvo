@@ -49,8 +49,12 @@ add_library(sdv STATIC
   src/sdv/place_database.cpp
   src/sdv/photometric_ba.h
   src/sdv/photometric_ba.cpp
+  src/sdv/photometric_ba_cost.h
+  src/sdv/photometric_ba_cost.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
+  src/sdv/point_filter.h
+  src/sdv/point_filter.cpp
   src/sdv/point_selector.h
   src/sdv/point_selector.cpp
   src/sdv/profiler.h
@@ -82,8 +86,8 @@ add_library(sdv STATIC
 )
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
-  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio opencv_features2d yaml-cpp::yaml-cpp
-  PRIVATE fbow::fbow Ceres::ceres)
+  opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio opencv_features2d yaml-cpp::yaml-cpp Ceres::ceres
+  PRIVATE fbow::fbow)
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
@@ -142,6 +146,7 @@ add_executable(sdv_tests
   tests/test_pose_graph.cpp
   tests/test_global_ba.cpp
   tests/test_photometric_ba.cpp
+  tests/test_photometric_ba_cost.cpp
   tests/test_place_database.cpp
   tests/test_mono_initializer.cpp
   tests/test_odometry.cpp

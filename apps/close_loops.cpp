@@ -21,6 +21,7 @@
 #include <sdv/io/ply.h>
 #include <sdv/io/rig_config.h>
 #include <sdv/photometric_ba.h>
+#include <sdv/point_filter.h>
 #include <sdv/loop_detector.h>
 #include <sdv/pose_graph.h>
 
@@ -72,7 +73,8 @@ int main(int argc, char** argv) {
   bool bundleAdjust = false, photometric = false;
   std::string rigFile, sequenceDir;
   std::vector<std::string> rigCameras;
-  double scale = 1.0, maxDistanceFactor = 5.0;
+  double scale = 1.0, maxDistanceFactor = 5.0, maxDepthSigma = 0.0, neighbourRadius = 0.2;
+  int minResiduals = 3, minNeighbours = 3;
   sdv::LoopSettings loopSettings;
   sdv::PoseGraphSettings graphSettings;
   sdv::GlobalBASettings baSettings;
@@ -116,7 +118,14 @@ int main(int argc, char** argv) {
        "odometry edge sigma factor (0 = off)")
       ("ply", po::value(&plyFile), "write corrected keyframe trajectory and bundle-adjusted points")
       ("max-distance-factor", po::value(&maxDistanceFactor)->default_value(5.0),
-       "PLY: drop points farther than this times the median distance from their camera");
+       "PLY: drop points farther than this times the median distance from their camera")
+      ("min-residuals", po::value(&minResiduals)->default_value(3), "PLY: residuals a point needs after the BA")
+      ("max-depth-sigma", po::value(&maxDepthSigma)->default_value(0.0),
+       "PLY: relative inverse-depth sigma limit (unit photometric noise, 0 = off)")
+      ("min-neighbours", po::value(&minNeighbours)->default_value(3), "PLY: neighbours a point needs (0 = off)")
+      ("neighbour-radius", po::value(&neighbourRadius)->default_value(0.2), "PLY: neighbour radius, m")
+      ("pba-min-initial", po::value(&pbaSettings.minInitialResiduals)->default_value(pbaSettings.minInitialResiduals),
+       "residuals a point needs to pass the initial check to take part");
   try {
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv)
@@ -232,14 +241,29 @@ int main(int argc, char** argv) {
       std::vector<Sophus::SE3d> kfs = after;
       scene.addTrajectory(kfs, {220, 0, 0});
       if (photometric && !pba.points.empty()) {
-        // Like run_vo: points far beyond the typical distance (near infinity) or without residuals left are dropped.
+        // As in run_vo: distance limit (points near infinity), residuals left, depth uncertainty, isolated points.
         std::vector<double> d = pba.pointDistance;
         std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
         const double limit = maxDistanceFactor * d[d.size() / 2];
-        size_t kept = 0;
+        std::vector<double> sigma;
         for (size_t i = 0; i < pba.points.size(); ++i)
-          if (pba.pointDistance[i] <= limit && pba.pointResiduals[i] >= 2) scene.addPoint(pba.points[i], {200, 200, 200}), ++kept;
-        spdlog::info("{} of {} points written (distance limit {:.1f} m, 2+ residuals)", kept, pba.points.size(), limit);
+          if (pba.pointResiduals[i] > 0) sigma.push_back(pba.pointDepthSigma[i]);
+        std::sort(sigma.begin(), sigma.end());
+        if (!sigma.empty())
+          spdlog::info("points with residuals: {}, relative depth sigma {:.3g} / {:.3g} / {:.3g} (10/50/90 %)",
+                       sigma.size(), sigma[sigma.size() / 10], sigma[sigma.size() / 2], sigma[sigma.size() * 9 / 10]);
+        std::vector<Eigen::Vector3d> candidates;
+        for (size_t i = 0; i < pba.points.size(); ++i)
+          if (pba.pointDistance[i] <= limit && pba.pointResiduals[i] >= minResiduals &&
+              (maxDepthSigma <= 0 || pba.pointDepthSigma[i] <= maxDepthSigma))
+            candidates.push_back(pba.points[i]);
+        const std::vector<char> keep = sdv::hasNeighbours(candidates, neighbourRadius, minNeighbours);
+        size_t kept = 0;
+        for (size_t i = 0; i < candidates.size(); ++i)
+          if (keep[i]) scene.addPoint(candidates[i], {200, 200, 200}), ++kept;
+        spdlog::info("{} of {} points written ({} after distance {:.1f} m, {}+ residuals, depth sigma; then {}+ "
+                     "neighbours within {:.2f} m)",
+                     kept, pba.points.size(), candidates.size(), limit, minResiduals, minNeighbours, neighbourRadius);
       } else {
         for (const auto& p : ba.points) scene.addPoint(p, {200, 200, 200});
       }

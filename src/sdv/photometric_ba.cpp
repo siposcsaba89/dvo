@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <execution>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -11,73 +12,17 @@
 #include <thread>
 
 #include <ceres/ceres.h>
-#include <ceres/cubic_interpolation.h>
-#include <sophus/ceres_manifold.hpp>
 
 #include <sdv/image_pyramid.h>
+#include <sdv/photometric_ba_cost.h>
 
 namespace sdv {
 
 namespace {
 
-using Grid = ceres::Grid2D<std::uint8_t, 1>;  // 8-bit images: a quarter of the memory of float grids
-using Interpolator = ceres::BiCubicInterpolator<Grid>;
-
-struct PointData {
-  int host, hostCam;
-  PatternPoint pattern;
-  Eigen::Vector3d bearing;  // centre
-};
-
-// Pattern residual of a point in a target camera, relative pose T_t_h (target camera <- host camera), affine
-// brightness I_t - b_t = exp(a_t - a_h) (I_h - b_h), each pixel weighted by the square root of its gradient weight.
-template <typename T>
-void patternResidual(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3<T>& T_t_h,
-                     const T& rho, const T* ah, const T* at, T* residual) {
-  using std::exp;
-  const T scale = exp(at[0] - ah[0]);
-  for (int k = 0; k < kPatternSize; ++k) {
-    const Eigen::Matrix<T, 3, 1> x = T_t_h.so3() * p.pattern.bearings[k].cast<T>() + rho * T_t_h.translation();
-    Eigen::Matrix<T, 2, 1> uv;
-    if (!cam.project(x, uv)) {
-      residual[k] = T(0);
-      continue;
-    }
-    T intensity;
-    image.Evaluate(uv.y(), uv.x(), &intensity);
-    residual[k] = T(std::sqrt(p.pattern.gradientWeights[k])) *
-                  ((intensity - at[1]) - scale * (T(p.pattern.intensities[k]) - ah[1]));
-  }
-}
-
-struct TemporalResidual {
-  const PointData* point;
-  const Camera* cam;
-  const Interpolator* image;
-  Sophus::SE3d T_ct_b, T_b_ch;
-
-  template <typename T>
-  bool operator()(const T* host, const T* target, const T* rho, const T* ah, const T* at, T* residual) const {
-    const Eigen::Map<const Sophus::SE3<T>> T_w_h(host), T_w_t(target);
-    const Sophus::SE3<T> T_t_h = T_ct_b.cast<T>() * T_w_t.inverse() * T_w_h * T_b_ch.cast<T>();
-    patternResidual(*point, *cam, *image, T_t_h, rho[0], ah, at, residual);
-    return true;
-  }
-};
-
-// Another camera of the host keyframe: the relative pose is the fixed extrinsic.
-struct StaticResidual {
-  const PointData* point;
-  const Camera* cam;
-  const Interpolator* image;
-  Sophus::SE3d T_t_h;
-
-  template <typename T>
-  bool operator()(const T* rho, const T* ah, const T* at, T* residual) const {
-    patternResidual(*point, *cam, *image, T_t_h.cast<T>(), rho[0], ah, at, residual);
-    return true;
-  }
-};
+using pba::Grid;
+using pba::Interpolator;
+using pba::PointData;
 
 double angle(const Eigen::Vector3d& a, const Eigen::Vector3d& b) { return std::atan2(a.cross(b).norm(), a.dot(b)); }
 
@@ -93,7 +38,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   result.T_w_b = initial_T_w_b;
   if (nk < 2) return result;
 
-  // Float images for the interpolators (kept alive here), host patterns from a one-level pyramid per image.
+  // 8-bit images for the interpolators (kept alive here), host patterns from a one-level float pyramid per image.
   std::vector<cv::Mat> gray(static_cast<size_t>(nk) * nc);
   std::vector<std::unique_ptr<Grid>> grids(gray.size());
   std::vector<std::unique_ptr<Interpolator>> interpolators(gray.size());
@@ -162,7 +107,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
           continue;
         const Sophus::SE3d T_t_h = T_w_ct.inverse() * T_w_ch;
         double r[kPatternSize];
-        patternResidual(p, rig.cameras[tc], *interpolators[static_cast<size_t>(t) * nc + tc], T_t_h, rho[pi],
+        pba::patternResidual(p, rig.cameras[tc], *interpolators[static_cast<size_t>(t) * nc + tc], T_t_h, rho[pi],
                         affine[p.host * nc + p.hostCam].data(), affine[t * nc + tc].data(), r);
         double sq = 0;
         for (double v : r) sq += v * v;
@@ -172,6 +117,9 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     };
     for (int t : targets) consider(t, false);
     for (int t : loopTargets) consider(t, true);
+    // A point that agrees with too few images at the start is most likely a wrong depth; it would only be dropped
+    // later as an outlier, after costing time.
+    if (static_cast<int>(perPoint[pi].size()) < settings.minInitialResiduals) perPoint[pi].clear();
   });
 
   ceres::Problem::Options problemOptions;
@@ -179,7 +127,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   problemOptions.enable_fast_removal = true;
   ceres::Problem problem(problemOptions);
   ceres::HuberLoss loss(settings.huber * std::sqrt(static_cast<double>(kPatternSize)));
-  for (auto& p : poses) problem.AddParameterBlock(p.data(), 7, new Sophus::Manifold<Sophus::SE3>());
+  for (auto& p : poses) problem.AddParameterBlock(p.data(), 7, new pba::SE3TangentManifold());
   problem.SetParameterBlockConstant(poses[0].data());
   for (auto& a : affine) problem.AddParameterBlock(a.data(), 2);
   problem.SetParameterBlockConstant(affine[0].data());
@@ -187,6 +135,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     ceres::ResidualBlockId id;
     bool loop;
     int point;
+    int rhoIndex;  // parameter block index of the inverse depth
   };
   std::vector<Block> blocks;
   for (const auto& list : perPoint)
@@ -198,15 +147,13 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
       ceres::ResidualBlockId id;
       if (cd.target == p.host)
         id = problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<StaticResidual, kPatternSize, 1, 2, 2>(new StaticResidual{
-                &p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam] * rig.T_c_b[p.hostCam].inverse()}),
+            new pba::StaticCost(&p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam] * rig.T_c_b[p.hostCam].inverse()),
             &loss, &rho[cd.point], ah, at);
       else
         id = problem.AddResidualBlock(
-            new ceres::AutoDiffCostFunction<TemporalResidual, kPatternSize, 7, 7, 1, 2, 2>(new TemporalResidual{
-                &p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam], rig.T_c_b[p.hostCam].inverse()}),
+            new pba::TemporalCost(&p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam], rig.T_c_b[p.hostCam].inverse()),
             &loss, poses[p.host].data(), poses[cd.target].data(), &rho[cd.point], ah, at);
-      blocks.push_back({id, cd.loop, cd.point});
+      blocks.push_back({id, cd.loop, cd.point, cd.target == p.host ? 0 : 2});
     }
   for (double& r : rho)
     if (problem.HasParameterBlock(&r)) problem.SetParameterLowerBound(&r, 0, 1e-4);
@@ -216,8 +163,9 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
       const double d = T_a_b.translation().norm();
       const auto& o = settings.odometry;
       problem.AddResidualBlock(
-          relativePoseCost(T_a_b, settings.odometrySigmaFactor * (o.odometryTranslationBase + o.odometryTranslationRate * d),
-                           settings.odometrySigmaFactor * (o.odometryRotationBaseDeg + o.odometryRotationRateDegPerMeter * d)),
+          new pba::RelativePoseCost(
+              T_a_b, settings.odometrySigmaFactor * (o.odometryTranslationBase + o.odometryTranslationRate * d),
+              settings.odometrySigmaFactor * (o.odometryRotationBaseDeg + o.odometryRotationRateDegPerMeter * d)),
           nullptr, poses[k].data(), poses[k + 1].data());
     }
 
@@ -252,8 +200,17 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
       }
   }
   result.pointResiduals.assign(points.size(), 0);
-  for (const auto& b : blocks)
-    if (b.id) ++result.residuals, result.loopResiduals += b.loop, ++result.pointResiduals[b.point];
+  std::vector<double> depthInformation(points.size(), 0.0);
+  for (const auto& b : blocks) {
+    if (!b.id) continue;
+    ++result.residuals, result.loopResiduals += b.loop, ++result.pointResiduals[b.point];
+    double residual[kPatternSize], dRho[kPatternSize];
+    std::array<double*, 5> jacobians{};
+    jacobians[b.rhoIndex] = dRho;
+    double cost = 0;
+    problem.EvaluateResidualBlock(b.id, false, &cost, residual, jacobians.data());
+    for (double j : dRho) depthInformation[b.point] += j * j;
+  }
   result.rmseAfter = rmse();
 
   for (int k = 0; k < nk; ++k) result.T_w_b[k] = Eigen::Map<const Sophus::SE3d>(poses[k].data());
@@ -264,6 +221,8 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     result.points.push_back(result.T_w_b[points[i].host] * rig.T_c_b[points[i].hostCam].inverse() *
                             (points[i].bearing / rho[i]));
     result.pointDistance.push_back(1.0 / rho[i]);
+    result.pointDepthSigma.push_back(depthInformation[i] > 0 ? 1.0 / (rho[i] * std::sqrt(depthInformation[i]))
+                                                             : std::numeric_limits<double>::infinity());
   }
   return result;
 }

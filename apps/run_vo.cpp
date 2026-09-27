@@ -31,6 +31,7 @@
 #include <sdv/io/rig_config.h>
 #include <sdv/loop_detector.h>
 #include <sdv/odometry.h>
+#include <sdv/point_filter.h>
 #include <sdv/pose_graph.h>
 #include <sdv/semi_dense_mapper.h>
 #include <sdv/undistort.h>
@@ -499,29 +500,9 @@ int main(int argc, char** argv) {
       });
       const size_t afterQuality = mapPoints.size();
       if (minNeighbours > 0) {
-        // Voxels of the neighbour radius; a point needs minNeighbours others within the radius.
-        const double r = neighbourRadius / alignment.scale;
-        auto key = [&](const Eigen::Vector3d& x) {
-          return std::array<long long, 3>{static_cast<long long>(std::floor(x.x() / r)),
-                                          static_cast<long long>(std::floor(x.y() / r)),
-                                          static_cast<long long>(std::floor(x.z() / r))};
-        };
-        std::map<std::array<long long, 3>, std::vector<size_t>> grid;
-        for (size_t i = 0; i < mapPoints.size(); ++i) grid[key(mapPoints[i].position)].push_back(i);
-        std::vector<char> keep(mapPoints.size(), 0);
-        for (size_t i = 0; i < mapPoints.size(); ++i) {
-          const auto k = key(mapPoints[i].position);
-          int count = 0;
-          for (long long dx = -1; dx <= 1 && count < minNeighbours; ++dx)
-            for (long long dy = -1; dy <= 1 && count < minNeighbours; ++dy)
-              for (long long dz = -1; dz <= 1 && count < minNeighbours; ++dz) {
-                const auto it = grid.find({k[0] + dx, k[1] + dy, k[2] + dz});
-                if (it == grid.end()) continue;
-                for (size_t j : it->second)
-                  if (j != i && (mapPoints[j].position - mapPoints[i].position).norm() < r && ++count >= minNeighbours) break;
-              }
-          keep[i] = count >= minNeighbours;
-        }
+        std::vector<Eigen::Vector3d> positions;
+        for (const auto& p : mapPoints) positions.push_back(p.position);
+        const std::vector<char> keep = sdv::hasNeighbours(positions, neighbourRadius / alignment.scale, minNeighbours);
         size_t w = 0;
         for (size_t i = 0; i < mapPoints.size(); ++i)
           if (keep[i]) mapPoints[w++] = mapPoints[i];

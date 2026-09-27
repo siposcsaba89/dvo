@@ -264,3 +264,12 @@ so both stay optional and the pose graph is the default. The photometric BA is t
 the laps weakly when points are subsampled (0.25 % cross-loop residuals on KITTI). Next: filter points before the BA
 (3+ consistent initial residuals) and after it (residual count, depth sigma from the BA information, neighbours, as
 in run_vo), analytic Jacobians (as in the window BA), denser cross-lap residuals.
+
+Follow-up (step 17): photometric BA with analytic Jacobians (`photometric_ba_cost`: host pose
+dx/dxi = R [rho I, -[b]x] Adj(T_b_ch^-1), target pose dx/dxi = [-rho I, [x]x] Adj(T_ct_b), inverse depth t_t_h, affine;
+numeric tests; a tangent SE3 manifold with PlusJacobian [I; 0] so costs write tangent Jacobians directly):
+identical result, garage 268 -> 115 s. Points take part only with 3+ residuals that pass the initial check; after
+the BA each point gets its relative depth sigma from the depth information of its residuals (garage 10/50/90 %:
+0.00019 / 0.00055 / 0.0024, as run_vo's active points), and close_loops writes the PLY with run_vo's filter (distance,
+3+ residuals, depth sigma, 3+ neighbours within 0.2 m; `point_filter` shared with run_vo). Garage, same filter:
+odometry only 57.8k points pass, pose graph 59.6k, photometric BA 72.3k (+21 %: more points consistent across images).
