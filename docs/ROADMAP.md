@@ -301,3 +301,57 @@ after the BA; the voxel check also keeps 4 % more dense points), 874k points wri
 KITTI 00 (4541 frames, stereo): 336k sparse points after the photometric BA, densify 100M candidates, 4.8 good traces
 each, 11.7M points after the voxel check (1531 s, ~340 ms/frame at full resolution), 754k pairs merged, 11.0M points
 written. Revisited streets show single facades in the top view.
+
+## Step 18 log
+
+aiMotive recordings as rig input (`sdv_aimrec`, `aimrec_extract`): camera meta files (v8), H.264 streams decoded
+with FFmpeg (random access by frame id), calibration from `aimprototype_config.zip` or a `sensorconfig.yaml` (EUCM,
+yaw/pitch/roll extrinsics, obstruction masks, only for the selected cameras), cameras synchronised on the frame ids
+all selected cameras recorded. A rig YAML with `aim_record` runs the recording directly; `aimrec_extract --rig-out`
+writes one. No IMU/INS data is used.
+
+Rig options: `image_width` per camera (images and intrinsics resized first, pixel-centre convention, so cameras of
+different resolution share a run scale) and `mask_inflate` (rig-wide or per camera; masked areas grow by N pixels of
+the camera image, not from the image border).
+
+Garage `voxelnet 20250414T141729Z_nm` (3286 frames, 15 fps, 130 m), autocalib calibration, `--scale 0.5`:
+
+| Odometry cameras | Densify cameras | Odometry | Loops (rejected) | Loop correction (median) | Cloud |
+|---|---|---|---|---|---|
+| 4 fisheyes | same | 63 ms/frame | 243 (0) | 0.58 m | 2.13M |
+| 4 fisheyes + CT L/R + neighbour-lane L/R | same | 153 ms/frame | 290 (0) | 0.12 m | 3.73M |
+| CT L/R + neighbour-lane L/R | all 8 (brightness fit) | 66 ms/frame | 126 (0) | 0.05 m | 5.35M |
+
+The record-root calibration of the same vehicle gave a noisy 8-camera cloud (20 rejected loops): the CT and
+neighbour-lane cameras have 2.3x the fisheyes' focal length, so their nominal extrinsics were off by several pixels.
+The trajectories of the autocalib runs agree to 0.06 m (median) after loop closure, Sim3 scale 0.99-1.00.
+
+`close_loops --densify-cameras`: densify with more rig cameras than the odometry used (frames synced to the run's frame
+ids; the extra cameras keep the rig extrinsics). Their affine brightness per keyframe is fitted after the photometric
+BA (`brightness_fit`): BA points with their irradiance e^-a_h (I_h - b_h) (gauge of the adjusted cameras), hosted
+within 5 keyframes, projected into the camera's keyframe image, I = e^a J + b by Huber-weighted orthogonal regression
+with a redescending pass against occlusions. Garage fisheyes: a -0.18 .. -0.29, b +24 .. +35, 270/270 keyframes
+fitted; with identity brightness densify had accepted 5.99M instead of 9.12M points (3.25M instead of 5.35M written).
+
+Floating points (fewer than 15 neighbours within 0.3 m): 0.8 % of every cloud (fisheye, 8-camera and CT/NL runs alike),
+0.49 % after the brightness fit. `close_loops --points-out` writes the points with their attributes (source, host
+camera, frame, pixel, distance, good traces, interval) for such analyses. No attribute separates them (all cameras,
+typical trace counts, not near the mask edges; rate rising with distance, 5 % beyond 18 m): consistent wrong matches.
+Within 0.5-0.7 m of the host camera (the densify search limit) 21-33 % of the points float. A stricter neighbour
+filter (10 within 0.2 m) removes ~93 % of them at 0.5 % of the other points; a free-space (visibility) check would be
+the targeted filter.
+
+COLMAP export (`export_colmap`, `ColmapExporter` shared with `run_vo --colmap`): from a finished run (rig, close_loops
+poses, a cloud PLY, optionally `close_loops --brightness-out`), frames selected by motion (0.25 m or 5 deg since the
+last exported one: 456 of 3286 garage frames, a third of the recording is standing), EUCM cameras undistorted to
+virtual pinholes of the same focal length cropped to 100 deg per axis (at 132 deg the fisheye edges were stretched
+4.5x, at 100 deg ~2x), masks, points3D voxel-thinned (3 cm: 5.30M -> 1.96M), exposure.txt. Garage, all 8 cameras at
+full rig resolution: 3648 images, 763 MB, 2 min. Points projected through the exported model land on the image
+structure in every camera. Open: OPENCV_FISHEYE (Kannala-Brandt) for the fisheyes' full field of view in 3DGUT,
+masks in the gsplat loss (the ego vehicle is black in the images), gsplat training (step 22).
+
+## Step 20 log
+
+`close_loops --pba-extrinsics`: the photometric BA optionally refines the rig extrinsics (first camera fixed, priors
+towards the rig in translation and rotation), reports the change per camera and writes the refined rig
+(`--rig-out`). Not used for the autocalib runs above: their extrinsics were consistent without it.

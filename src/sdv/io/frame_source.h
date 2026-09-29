@@ -11,6 +11,10 @@
 
 namespace sdv {
 
+namespace aimrec {
+class Recording;
+}
+
 // Sequential image input. Frames come as stored (colour or grey); next() returns an empty Mat at the end,
 // skip() advances by one frame without decoding where possible and returns false at the end.
 class FrameSource {
@@ -64,12 +68,41 @@ class SubsampledSource : public FrameSource {
  public:
   SubsampledSource(std::unique_ptr<FrameSource> source, size_t start, size_t stride);
   cv::Mat next() override;
+  bool skip() override;
   void rewind() override;
 
  private:
   std::unique_ptr<FrameSource> m_source;
   size_t m_start, m_stride;
   bool m_started = false;
+};
+
+// Frames of another source resized by `scale` (INTER_AREA).
+class ScaledSource : public FrameSource {
+ public:
+  ScaledSource(std::unique_ptr<FrameSource> source, double scale) : m_source(std::move(source)), m_scale(scale) {}
+  cv::Mat next() override;
+  bool skip() override { return m_source->skip(); }
+  void rewind() override { m_source->rewind(); }
+
+ private:
+  std::unique_ptr<FrameSource> m_source;
+  double m_scale;
+};
+
+// One camera of an aiMotive recording (BGR), over the frame ids that all open cameras of the recording have, so the
+// sources of one recording stay synchronised when a camera drops a frame. Skipping does not decode.
+class AimRecordSource : public FrameSource {
+ public:
+  AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera);
+  cv::Mat next() override;
+  bool skip() override;
+  void rewind() override { m_next = 0; }
+
+ private:
+  std::shared_ptr<aimrec::Recording> m_recording;
+  int m_camera;
+  size_t m_next = 0;
 };
 
 }  // namespace sdv

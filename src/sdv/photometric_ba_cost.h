@@ -65,6 +65,50 @@ class StaticCost : public ceres::SizedCostFunction<kPatternSize, 1, 2, 2> {
   Sophus::SE3d m_T_t_h;
 };
 
+// Costs with free rig extrinsics: T_b_c blocks (7, SE3TangentManifold). T_b_c exp(delta) is the left perturbation
+// T_c_b <- exp(-delta) T_c_b of the camera-from-body transform, so the extrinsics share the manifold of the poses.
+// Temporal residual between two cameras. Parameters: host T_w_b, target T_w_b, host T_b_c, target T_b_c, inverse
+// depth, host affine, target affine.
+class TemporalExtrinsicCost : public ceres::SizedCostFunction<kPatternSize, 7, 7, 7, 7, 1, 2, 2> {
+ public:
+  TemporalExtrinsicCost(const PointData* point, const Camera* cam, const Interpolator* image)
+      : m_point(point), m_cam(cam), m_image(image) {}
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  const PointData* m_point;
+  const Camera* m_cam;
+  const Interpolator* m_image;
+};
+
+// Temporal residual in the host camera itself (one extrinsic block for host and target). Parameters: host T_w_b,
+// target T_w_b, T_b_c, inverse depth, host affine, target affine.
+class TemporalSameCameraExtrinsicCost : public ceres::SizedCostFunction<kPatternSize, 7, 7, 7, 1, 2, 2> {
+ public:
+  TemporalSameCameraExtrinsicCost(const PointData* point, const Camera* cam, const Interpolator* image)
+      : m_point(point), m_cam(cam), m_image(image) {}
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  const PointData* m_point;
+  const Camera* m_cam;
+  const Interpolator* m_image;
+};
+
+// Another camera of the host keyframe, T_t_h = T_ct_b T_b_ch. Parameters: host T_b_c, target T_b_c, inverse depth,
+// host affine, target affine.
+class StaticExtrinsicCost : public ceres::SizedCostFunction<kPatternSize, 7, 7, 1, 2, 2> {
+ public:
+  StaticExtrinsicCost(const PointData* point, const Camera* cam, const Interpolator* image)
+      : m_point(point), m_cam(cam), m_image(image) {}
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  const PointData* m_point;
+  const Camera* m_cam;
+  const Interpolator* m_image;
+};
+
 // Relative pose prior log(T_a_b_measured^-1 T_w_a^-1 T_w_b) weighted by the sigmas, for SE3TangentManifold poses;
 // Jacobians with the right Jacobian of SE3 taken as identity (small residuals).
 class RelativePoseCost : public ceres::SizedCostFunction<6, 7, 7> {

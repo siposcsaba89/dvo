@@ -43,3 +43,21 @@ TEST(Ply, SkipsNonFiniteVertices) {
   scene.addTrajectory(traj, {255, 0, 0});
   EXPECT_EQ(scene.numVertices(), 3u);
 }
+
+TEST(Ply, ReadsPointsWithoutTrajectory) {
+  std::vector<Sophus::SE3d> traj;
+  for (int i = 0; i < 3; ++i) traj.emplace_back(Sophus::SO3d(), Eigen::Vector3d(i, 0, 0));
+  sdv::PlyScene scene;
+  scene.addTrajectory(traj, {255, 0, 0});
+  scene.addPoint({1, 2, 3}, {10, 20, 30});
+  scene.addPoint({-1, 0.5, 2}, {40, 50, 60});
+  const auto file = std::filesystem::temp_directory_path() / "sdv_test_read.ply";
+  scene.write(file);
+  std::vector<Eigen::Vector3d> points;
+  std::vector<sdv::Rgb> colors;
+  sdv::readPlyPoints(file, points, colors);
+  std::filesystem::remove(file);
+  ASSERT_EQ(points.size(), 2u);
+  EXPECT_TRUE(points[1].isApprox(Eigen::Vector3d(-1, 0.5, 2)));
+  EXPECT_EQ(colors[0], (sdv::Rgb{10, 20, 30}));
+}

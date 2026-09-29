@@ -35,6 +35,21 @@ struct PhotometricBASettings {
   int rounds = 2;
   int iterations = 30;
   PhotometricSettings photometric;
+  // Optional: also refine the rig extrinsics T_c_b (one per camera, shared by all keyframes; camera 0 stays fixed as
+  // the body reference), with a prior towards the input rig. Static residuals between overlapping cameras fix the
+  // relative extrinsics; temporal ones also the camera orientation relative to the body motion.
+  bool refineExtrinsics = false;
+  double extrinsicSigmaT = 0.05;     // m
+  double extrinsicSigmaRDeg = 2.0;
+};
+
+// Photometric rmse per pattern pixel of the residuals from camera `host` into camera `target`, over the residuals
+// kept after the adjustment, with the initial and the final estimate (the per-camera consistency check).
+struct CameraPairError {
+  int host, target;
+  bool sameKeyframe;  // static residuals (other camera of the host keyframe) or temporal ones
+  size_t residuals;
+  double rmseBefore, rmseAfter;
 };
 
 struct PhotometricBAResult {
@@ -51,12 +66,14 @@ struct PhotometricBAResult {
   size_t residuals = 0, loopResiduals = 0;
   double rmseBefore = 0, rmseAfter = 0;  // intensity per pattern pixel over the used residuals
   int iterations = 0;
+  std::vector<Sophus::SE3d> T_c_b;  // rig extrinsics after the adjustment (the input ones without refineExtrinsics)
+  std::vector<CameraPairError> cameraPairs;
 };
 
 // Global photometric bundle adjustment over all keyframes: every map point stored in the records (host keyframe
 // camera, pixel, inverse distance) gets pattern residuals in the cameras of nearby keyframes and of keyframes linked
 // by loops; keyframe poses, affine brightness per keyframe camera and inverse depths are optimised (rig extrinsics
-// fixed; first keyframe pose and its camera-0 brightness fixed). images[k][c]: grey keyframe images at the scale of
+// fixed unless settings.refineExtrinsics; first keyframe pose and its camera-0 brightness fixed). images[k][c]: grey keyframe images at the scale of
 // the records' cameras. Needs initial poses within ~1-2 px, e.g. after the pose graph.
 PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<KeyframeRecord>& records,
                                             const std::vector<std::vector<cv::Mat>>& images,

@@ -22,6 +22,25 @@ find_package(tinyply CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(fbow CONFIG REQUIRED)
 find_package(Ceres CONFIG REQUIRED)
+find_package(libzip CONFIG REQUIRED)
+find_package(FFmpegLibs CONFIG REQUIRED COMPONENTS avcodec avutil swscale PATHS ${CMAKE_CURRENT_SOURCE_DIR}/cmake
+  NO_DEFAULT_PATH)
+
+# aiMotive recording reader (camera streams, sensorconfig calibration); independent of the odometry library.
+add_library(sdv_aimrec STATIC
+  src/sdv/aimrec/calibration.h
+  src/sdv/aimrec/calibration.cpp
+  src/sdv/aimrec/camera_meta.h
+  src/sdv/aimrec/camera_meta.cpp
+  src/sdv/aimrec/camera_stream.h
+  src/sdv/aimrec/camera_stream.cpp
+  src/sdv/aimrec/recording.h
+  src/sdv/aimrec/recording.cpp
+)
+target_include_directories(sdv_aimrec PUBLIC src)
+target_link_libraries(sdv_aimrec PUBLIC Eigen3::Eigen Sophus::Sophus opencv_core
+  PRIVATE opencv_imgcodecs opencv_imgproc spdlog::spdlog yaml-cpp::yaml-cpp libzip::zip
+  FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale)
 
 add_library(sdv STATIC
   src/sdv/camera.h
@@ -38,6 +57,8 @@ add_library(sdv STATIC
   src/sdv/map_point.h
   src/sdv/odometry.h
   src/sdv/odometry.cpp
+  src/sdv/brightness_fit.h
+  src/sdv/brightness_fit.cpp
   src/sdv/semi_dense_mapper.h
   src/sdv/semi_dense_mapper.cpp
   src/sdv/parallel.h
@@ -74,6 +95,8 @@ add_library(sdv STATIC
   src/sdv/io/kitti.h
   src/sdv/io/colmap.h
   src/sdv/io/colmap.cpp
+  src/sdv/io/colmap_export.h
+  src/sdv/io/colmap_export.cpp
   src/sdv/io/camera_config.h
   src/sdv/io/camera_config.cpp
   src/sdv/io/frame_source.h
@@ -89,7 +112,12 @@ add_library(sdv STATIC
 target_include_directories(sdv PUBLIC src)
 target_link_libraries(sdv PUBLIC Eigen3::Eigen Sophus::Sophus spdlog::spdlog tinyply
   opencv_core opencv_imgproc opencv_imgcodecs opencv_calib3d opencv_videoio opencv_features2d yaml-cpp::yaml-cpp Ceres::ceres
-  PRIVATE fbow::fbow)
+  PRIVATE fbow::fbow sdv_aimrec)
+# libstdc++ implements std::execution::par on top of oneTBB.
+if(NOT MSVC)
+  find_package(TBB CONFIG REQUIRED)
+  target_link_libraries(sdv PUBLIC TBB::tbb)
+endif()
 
 add_executable(run_kitti apps/run_kitti.cpp)
 target_link_libraries(run_kitti PRIVATE sdv Boost::program_options)
@@ -113,7 +141,10 @@ add_executable(video_frames apps/video_frames.cpp)
 target_link_libraries(video_frames PRIVATE sdv Boost::program_options)
 
 add_executable(rig_from_sensorconfig apps/rig_from_sensorconfig.cpp)
-target_link_libraries(rig_from_sensorconfig PRIVATE sdv Boost::program_options)
+target_link_libraries(rig_from_sensorconfig PRIVATE sdv sdv_aimrec Boost::program_options)
+
+add_executable(aimrec_extract apps/aimrec_extract.cpp)
+target_link_libraries(aimrec_extract PRIVATE sdv_aimrec spdlog::spdlog opencv_imgcodecs Boost::program_options)
 
 add_executable(estimate_sync apps/estimate_sync.cpp)
 target_link_libraries(estimate_sync PRIVATE sdv Boost::program_options)
@@ -136,9 +167,13 @@ target_link_libraries(detect_loops PRIVATE sdv Boost::program_options)
 add_executable(close_loops apps/close_loops.cpp)
 target_link_libraries(close_loops PRIVATE sdv Boost::program_options)
 
+add_executable(export_colmap apps/export_colmap.cpp)
+target_link_libraries(export_colmap PRIVATE sdv Boost::program_options)
+
 enable_testing()
 add_executable(sdv_tests
   tests/synthetic_scene.h
+  tests/test_aimrec.cpp
   tests/test_camera.cpp
   tests/test_colmap.cpp
   tests/test_camera_config.cpp
@@ -154,15 +189,17 @@ add_executable(sdv_tests
   tests/test_odometry.cpp
   tests/test_photometric.cpp
   tests/test_ply.cpp
+  tests/test_point_filter.cpp
   tests/test_point_merge.cpp
   tests/test_point_selector.cpp
   tests/test_pyramid.cpp
+  tests/test_brightness_fit.cpp
   tests/test_semi_dense_mapper.cpp
   tests/test_tracker.cpp
   tests/test_trajectory.cpp
   tests/test_window_optimizer.cpp
 )
 target_include_directories(sdv_tests PRIVATE tests)
-target_link_libraries(sdv_tests PRIVATE sdv GTest::gtest_main)
+target_link_libraries(sdv_tests PRIVATE sdv sdv_aimrec libzip::zip GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(sdv_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 60)

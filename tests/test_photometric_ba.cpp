@@ -23,6 +23,83 @@ sdv::Rig surroundRig() {
 
 }  // namespace
 
+namespace {
+
+// Keyframes of the surround rig along a gentle curve: records (points with depth noise) and rendered images.
+struct SyntheticRun {
+  std::vector<Sophus::SE3d> truth;
+  std::vector<sdv::KeyframeRecord> records;
+  std::vector<std::vector<cv::Mat>> images;
+};
+
+SyntheticRun renderRun(const sdv::Rig& rig, std::mt19937& rng, int keyframes) {
+  sdv::PointSelectorSettings selector;
+  selector.targetPoints = 300;
+  const sdv::PointSelector select(selector);
+  std::normal_distribution<double> noise(0.0, 1.0);
+  SyntheticRun run;
+  for (int k = 0; k < keyframes; ++k) {
+    run.truth.push_back(Sophus::SE3d(Sophus::SO3d::rotZ(0.04 * k), Eigen::Vector3d(0.25 * k, 0.03 * k, 0)));
+    sdv::KeyframeRecord r{10 * k, run.truth.back(), std::vector<sdv::CameraFeatures>(rig.size()),
+                          std::vector<sdv::AffineBrightness>(rig.size())};
+    std::vector<cv::Mat> imgs;
+    for (int c = 0; c < rig.size(); ++c) {
+      const Sophus::SE3d T_c_w = rig.T_c_b[c] * run.truth.back().inverse();
+      cv::Mat img = synthetic::room::render(rig.cameras[c], T_c_w);
+      cv::GaussianBlur(img, img, cv::Size(0, 0), 1.0);
+      const sdv::ImagePyramid pyr(img, 1);
+      for (const auto& cand : select.select(pyr.level(0))) {
+        Eigen::Vector3d b;
+        const Eigen::Vector2d uv = cand.uv.cast<double>();
+        if (!rig.cameras[c].unproject(uv, b)) continue;
+        const double rho = synthetic::room::trueRho(T_c_w, b) * (1.0 + 0.03 * noise(rng));
+        r.cameras[c].pointUv.push_back(uv.cast<float>());
+        r.cameras[c].pointRho.push_back(static_cast<float>(rho));
+      }
+      imgs.push_back(img);
+    }
+    run.records.push_back(std::move(r));
+    run.images.push_back(std::move(imgs));
+  }
+  return run;
+}
+
+}  // namespace
+
+TEST(PhotometricBA, RefinesPerturbedExtrinsicsOnlyWhenAsked) {
+  const sdv::Rig truthRig = surroundRig();
+  std::mt19937 rng(5);
+  const SyntheticRun run = renderRun(truthRig, rng, 8);
+  // Left camera mounted 1 deg (yaw and pitch) and 3 cm off in the given rig; its records keep the true pixels.
+  sdv::Rig rig = truthRig;
+  rig.T_c_b[1] = Sophus::SE3d(Sophus::SO3d::rotY(0.0175) * Sophus::SO3d::rotX(0.0175), Eigen::Vector3d(0.03, 0, 0)) *
+                 truthRig.T_c_b[1];
+  sdv::PhotometricBASettings settings;
+  settings.odometrySigmaFactor = 0;
+  settings.maxInitialPixelError = 40.0;
+
+  const auto fixed = sdv::photometricBundleAdjust(rig, run.records, run.images, run.truth, {}, settings);
+  EXPECT_TRUE((fixed.T_c_b[1].matrix() - rig.T_c_b[1].matrix()).isZero(1e-12));
+
+  settings.refineExtrinsics = true;
+  const auto refined = sdv::photometricBundleAdjust(rig, run.records, run.images, run.truth, {}, settings);
+  EXPECT_TRUE((refined.T_c_b[0].matrix() - rig.T_c_b[0].matrix()).isZero(1e-12));  // body reference
+  for (int c = 1; c < rig.size(); ++c) {
+    const Sophus::SE3d err = refined.T_c_b[c] * truthRig.T_c_b[c].inverse();
+    EXPECT_LT(err.so3().log().norm(), 0.0035) << "camera " << c;  // 0.2 deg, from 1.4 deg
+    EXPECT_LT(err.translation().norm(), 0.015) << "camera " << c;
+  }
+  EXPECT_LT(refined.rmseAfter, fixed.rmseAfter);
+  // The per-pair check shows the left camera's static residuals improving.
+  bool sawLeftStatic = false;
+  for (const auto& p : refined.cameraPairs)
+    if (p.sameKeyframe && (p.host == 1 || p.target == 1) && p.residuals > 20) {
+      sawLeftStatic = true;
+      EXPECT_LT(p.rmseAfter, p.rmseBefore) << p.host << " -> " << p.target;
+    }
+  EXPECT_TRUE(sawLeftStatic);
+}
+
 TEST(PhotometricBA, RefinesPerturbedKeyframePosesAndDepths) {
   const sdv::Rig rig = surroundRig();
   sdv::PointSelectorSettings selector;

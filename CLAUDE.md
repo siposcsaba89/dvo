@@ -27,4 +27,3 @@ Work proceeds step by step along [docs/ROADMAP.md](docs/ROADMAP.md).
 - vcpkg (classic mode) at `E:/vcpkg`, triplet x64-windows; toolchain set in CMakePresets.json.
 - `cmake --preset vs2026`, `cmake --build --preset release`, `ctest --preset release`.
 - Data: KITTI at `E:/records/kitti/sequences/00`, ground truth `E:/records/kitti/poses/00.txt`.
-- No Python on this machine; tooling is C++.

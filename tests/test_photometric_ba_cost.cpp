@@ -117,6 +117,47 @@ TEST(PhotometricBACost, StaticJacobiansMatchNumeric) {
   for (int b = 0; b < 3; ++b) expectClose(analyticJacobian(cost, params, b, false), numericJacobian(cost, params, b, false), "static");
 }
 
+TEST(PhotometricBACost, TemporalExtrinsicJacobiansMatchNumeric) {
+  const Sophus::SE3d T_w_h(Sophus::SO3d::rotZ(0.1), Eigen::Vector3d(0.2, -0.1, 0.05));
+  const Sophus::SE3d T_w_t(Sophus::SO3d::rotZ(0.15) * Sophus::SO3d::rotX(0.02), Eigen::Vector3d(0.5, 0.05, 0.0));
+  const Scene s(T_w_h, T_w_t);
+  // The target image was rendered with s.T_c_b; the host camera gets a slightly different extrinsic, so that the
+  // adjoints differ between the blocks.
+  const Sophus::SE3d T_b_ch = s.T_c_b.inverse() * Sophus::SE3d(Sophus::SO3d::rotY(0.01), Eigen::Vector3d(0.01, 0, 0));
+  const sdv::pba::TemporalExtrinsicCost cost(&s.point, &s.cam, s.interpolator.get());
+  const std::vector<std::vector<double>> params = {poseParams(T_w_h),          poseParams(T_w_t), poseParams(T_b_ch),
+                                                   poseParams(s.T_c_b.inverse()), {s.rho}, {0.05, 2.0}, {-0.03, -1.0}};
+  const char* names[] = {"host pose", "target pose", "host extrinsic", "target extrinsic", "inverse depth",
+                         "host affine", "target affine"};
+  for (int b = 0; b < 7; ++b)
+    expectClose(analyticJacobian(cost, params, b, b < 4), numericJacobian(cost, params, b, b < 4), names[b]);
+}
+
+TEST(PhotometricBACost, TemporalSameCameraExtrinsicJacobiansMatchNumeric) {
+  const Sophus::SE3d T_w_h(Sophus::SO3d::rotZ(0.1), Eigen::Vector3d(0.2, -0.1, 0.05));
+  const Sophus::SE3d T_w_t(Sophus::SO3d::rotZ(0.15) * Sophus::SO3d::rotX(0.02), Eigen::Vector3d(0.5, 0.05, 0.0));
+  const Scene s(T_w_h, T_w_t);
+  const sdv::pba::TemporalSameCameraExtrinsicCost cost(&s.point, &s.cam, s.interpolator.get());
+  const std::vector<std::vector<double>> params = {poseParams(T_w_h), poseParams(T_w_t), poseParams(s.T_c_b.inverse()),
+                                                   {s.rho}, {0.05, 2.0}, {-0.03, -1.0}};
+  const char* names[] = {"host pose", "target pose", "extrinsic", "inverse depth", "host affine", "target affine"};
+  for (int b = 0; b < 6; ++b)
+    expectClose(analyticJacobian(cost, params, b, b < 3), numericJacobian(cost, params, b, b < 3), names[b]);
+}
+
+TEST(PhotometricBACost, StaticExtrinsicJacobiansMatchNumeric) {
+  const Sophus::SE3d T_b_t(Sophus::SO3d::rotZ(0.05), Eigen::Vector3d(0.1, 0.3, 0.0));
+  const Scene s(Sophus::SE3d(), T_b_t);
+  // Host camera at body pose identity, target camera: body T_b_t with the same mounting.
+  const Sophus::SE3d T_b_ch = s.T_c_b.inverse(), T_b_ct = T_b_t * s.T_c_b.inverse();
+  const sdv::pba::StaticExtrinsicCost cost(&s.point, &s.cam, s.interpolator.get());
+  const std::vector<std::vector<double>> params = {poseParams(T_b_ch), poseParams(T_b_ct), {s.rho}, {0.05, 2.0},
+                                                   {-0.03, -1.0}};
+  const char* names[] = {"host extrinsic", "target extrinsic", "inverse depth", "host affine", "target affine"};
+  for (int b = 0; b < 5; ++b)
+    expectClose(analyticJacobian(cost, params, b, b < 2), numericJacobian(cost, params, b, b < 2), names[b]);
+}
+
 TEST(PhotometricBACost, RelativePoseJacobiansMatchNumericNearTheMeasurement) {
   const Sophus::SE3d T_w_a(Sophus::SO3d::rotZ(0.3), Eigen::Vector3d(1, 2, 0));
   const Sophus::SE3d T_a_b(Sophus::SO3d::rotY(0.1), Eigen::Vector3d(1.5, 0.2, 0.1));

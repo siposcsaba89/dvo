@@ -14,26 +14,12 @@
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
 
+#include <sdv/aimrec/calibration.h>
+
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
 
 namespace {
-
-// Sensorconfig extrinsics: vehicle frame x forward, y left, z up; the camera orientation is
-// (Rx(roll) Ry(pitch) Rz(yaw))^T applied to a camera whose OpenCV axes are swapped to the vehicle axes by
-// Rz(-90 deg) Rx(-90 deg) (optical axis along vehicle x).
-Eigen::Matrix3d rotationBodyCamera(const std::vector<double>& yawPitchRollDeg) {
-  const double d = std::numbers::pi / 180.0;
-  const Eigen::Matrix3d R_vehicle = (Eigen::AngleAxisd(yawPitchRollDeg[2] * d, Eigen::Vector3d::UnitX()) *
-                                     Eigen::AngleAxisd(yawPitchRollDeg[1] * d, Eigen::Vector3d::UnitY()) *
-                                     Eigen::AngleAxisd(yawPitchRollDeg[0] * d, Eigen::Vector3d::UnitZ()))
-                                        .toRotationMatrix()
-                                        .transpose();
-  const Eigen::Matrix3d swap = (Eigen::AngleAxisd(-std::numbers::pi / 2, Eigen::Vector3d::UnitZ()) *
-                                Eigen::AngleAxisd(-std::numbers::pi / 2, Eigen::Vector3d::UnitX()))
-                                   .toRotationMatrix();
-  return R_vehicle * swap;
-}
 
 fs::path findVideo(const fs::path& dir, const std::string& deviceId) {
   for (const auto& e : fs::directory_iterator(dir))
@@ -105,7 +91,8 @@ int main(int argc, char** argv) {
         camFile << "mask: " << mask.generic_string() << "\n";
       }
 
-      const Eigen::Matrix3d R = rotationBodyCamera(ypr);
+      const Eigen::Matrix3d R =
+          sdv::aimrec::vehicleFromCamera(Eigen::Vector3d::Zero(), {ypr.at(0), ypr.at(1), ypr.at(2)}).rotationMatrix();
       const Eigen::Vector3d axis = R.col(2);
       spdlog::info("{}: {} {}, optical axis in vehicle frame ({:.3f}, {:.3f}, {:.3f})", label, deviceId,
                    findVideo(videos, deviceId).filename().string(), axis.x(), axis.y(), axis.z());

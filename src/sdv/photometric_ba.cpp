@@ -5,11 +5,13 @@
 #include <cmath>
 #include <execution>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <set>
 #include <thread>
+#include <tuple>
 
 #include <ceres/ceres.h>
 #include <spdlog/spdlog.h>
@@ -161,29 +163,69 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   problem.SetParameterBlockConstant(poses[0].data());
   for (auto& a : affine) problem.AddParameterBlock(a.data(), 2);
   problem.SetParameterBlockConstant(affine[0].data());
+
+  // Extrinsics as T_b_c blocks (see pba::TemporalExtrinsicCost), used only with refineExtrinsics.
+  std::vector<std::array<double, 7>> extrinsics(nc);
+  for (int c = 0; c < nc; ++c) std::copy_n(rig.T_c_b[c].inverse().data(), 7, extrinsics[c].data());
+  std::array<double, 7> identity;
+  std::copy_n(Sophus::SE3d().data(), 7, identity.data());
+  if (settings.refineExtrinsics) {
+    for (auto& e : extrinsics) problem.AddParameterBlock(e.data(), 7, new pba::SE3TangentManifold());
+    problem.SetParameterBlockConstant(extrinsics[0].data());
+    problem.AddParameterBlock(identity.data(), 7);
+    problem.SetParameterBlockConstant(identity.data());
+    for (int c = 1; c < nc; ++c)
+      problem.AddResidualBlock(new pba::RelativePoseCost(rig.T_c_b[c].inverse(), settings.extrinsicSigmaT,
+                                                         settings.extrinsicSigmaRDeg),
+                               nullptr, identity.data(), extrinsics[c].data());
+  }
+
   struct Block {
     ceres::ResidualBlockId id;
     bool loop;
     int point;
     int rhoIndex;  // parameter block index of the inverse depth
+    int hostCam, targetCam;
+    bool sameKeyframe;
+    double initialError;
   };
   std::vector<Block> blocks;
   for (const auto& list : perPoint)
     for (const Candidate& cd : list) {
       const PointData& p = points[cd.point];
       const Interpolator* image = interpolators[static_cast<size_t>(cd.target) * nc + cd.cam].get();
+      const Camera* cam = &rig.cameras[cd.cam];
       double* ah = affine[p.host * nc + p.hostCam].data();
       double* at = affine[cd.target * nc + cd.cam].data();
+      double* eh = extrinsics[p.hostCam].data();
+      double* et = extrinsics[cd.cam].data();
+      const bool sameKeyframe = cd.target == p.host;
       ceres::ResidualBlockId id;
-      if (cd.target == p.host)
+      int rhoIndex;
+      if (!settings.refineExtrinsics && sameKeyframe) {
         id = problem.AddResidualBlock(
-            new pba::StaticCost(&p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam] * rig.T_c_b[p.hostCam].inverse()),
-            &loss, &rho[cd.point], ah, at);
-      else
+            new pba::StaticCost(&p, cam, image, rig.T_c_b[cd.cam] * rig.T_c_b[p.hostCam].inverse()), &loss,
+            &rho[cd.point], ah, at);
+        rhoIndex = 0;
+      } else if (!settings.refineExtrinsics) {
         id = problem.AddResidualBlock(
-            new pba::TemporalCost(&p, &rig.cameras[cd.cam], image, rig.T_c_b[cd.cam], rig.T_c_b[p.hostCam].inverse()),
-            &loss, poses[p.host].data(), poses[cd.target].data(), &rho[cd.point], ah, at);
-      blocks.push_back({id, cd.loop, cd.point, cd.target == p.host ? 0 : 2});
+            new pba::TemporalCost(&p, cam, image, rig.T_c_b[cd.cam], rig.T_c_b[p.hostCam].inverse()), &loss,
+            poses[p.host].data(), poses[cd.target].data(), &rho[cd.point], ah, at);
+        rhoIndex = 2;
+      } else if (sameKeyframe) {
+        id = problem.AddResidualBlock(new pba::StaticExtrinsicCost(&p, cam, image), &loss, eh, et, &rho[cd.point],
+                                      ah, at);
+        rhoIndex = 2;
+      } else if (cd.cam == p.hostCam) {
+        id = problem.AddResidualBlock(new pba::TemporalSameCameraExtrinsicCost(&p, cam, image), &loss,
+                                      poses[p.host].data(), poses[cd.target].data(), eh, &rho[cd.point], ah, at);
+        rhoIndex = 3;
+      } else {
+        id = problem.AddResidualBlock(new pba::TemporalExtrinsicCost(&p, cam, image), &loss, poses[p.host].data(),
+                                      poses[cd.target].data(), eh, et, &rho[cd.point], ah, at);
+        rhoIndex = 4;
+      }
+      blocks.push_back({id, cd.loop, cd.point, rhoIndex, p.hostCam, cd.cam, sameKeyframe, 0.0});
     }
   for (double& r : rho)
     if (problem.HasParameterBlock(&r)) problem.SetParameterLowerBound(&r, 0, 1e-4);
@@ -212,6 +254,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     return n ? std::sqrt(sq / n) : 0.0;
   };
   result.rmseBefore = rmse();
+  for (auto& b : blocks) b.initialError = pixelError(b);
 
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::SPARSE_SCHUR;
@@ -235,7 +278,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     if (!b.id) continue;
     ++result.residuals, result.loopResiduals += b.loop, ++result.pointResiduals[b.point];
     double residual[kPatternSize], dRho[kPatternSize];
-    std::array<double*, 5> jacobians{};
+    std::array<double*, 7> jacobians{};
     jacobians[b.rhoIndex] = dRho;
     double cost = 0;
     problem.EvaluateResidualBlock(b.id, false, &cost, residual, jacobians.data());
@@ -243,12 +286,25 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   }
   result.rmseAfter = rmse();
 
+  // Per camera pair, over the same (kept) residuals before and after.
+  std::map<std::tuple<int, int, bool>, std::array<double, 3>> pairs;  // count, squared before, squared after
+  for (const auto& b : blocks) {
+    if (!b.id) continue;
+    auto& acc = pairs[{b.hostCam, b.targetCam, b.sameKeyframe}];
+    acc[0] += 1, acc[1] += b.initialError * b.initialError, acc[2] += std::pow(pixelError(b), 2);
+  }
+  for (const auto& [key, acc] : pairs)
+    result.cameraPairs.push_back({std::get<0>(key), std::get<1>(key), std::get<2>(key),
+                                  static_cast<size_t>(acc[0]), std::sqrt(acc[1] / acc[0]), std::sqrt(acc[2] / acc[0])});
+
+  result.T_c_b.resize(nc);
+  for (int c = 0; c < nc; ++c) result.T_c_b[c] = Eigen::Map<const Sophus::SE3d>(extrinsics[c].data()).inverse();
   for (int k = 0; k < nk; ++k) result.T_w_b[k] = Eigen::Map<const Sophus::SE3d>(poses[k].data());
   result.affine.assign(nk, std::vector<AffineBrightness>(nc));
   for (int k = 0; k < nk; ++k)
     for (int c = 0; c < nc; ++c) result.affine[k][c] = {affine[k * nc + c][0], affine[k * nc + c][1]};
   for (size_t i = 0; i < points.size(); ++i) {
-    result.points.push_back(result.T_w_b[points[i].host] * rig.T_c_b[points[i].hostCam].inverse() *
+    result.points.push_back(result.T_w_b[points[i].host] * result.T_c_b[points[i].hostCam].inverse() *
                             (points[i].bearing / rho[i]));
     result.pointDistance.push_back(1.0 / rho[i]);
     result.pointHost.push_back({points[i].host, points[i].hostCam});

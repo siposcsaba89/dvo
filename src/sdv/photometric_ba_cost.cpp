@@ -45,6 +45,52 @@ void zero(double** jacobians, int index) {
   if (jacobians && jacobians[index]) std::fill_n(jacobians[index], Rows * Cols, 0.0);
 }
 
+// Point Jacobians (3 x 6) of x = R b + rho t for T_t_h exp(xi) (host side) and exp(-xi) T_t_h (target side).
+Eigen::Matrix<double, 3, 6> hostSide(const Eigen::Matrix3d& R, const Eigen::Vector3d& b, double rho) {
+  Eigen::Matrix<double, 3, 6> dx;
+  dx << rho * R, -R * skew(b);
+  return dx;
+}
+
+Eigen::Matrix<double, 3, 6> targetSide(const Eigen::Vector3d& x, double rho) {
+  Eigen::Matrix<double, 3, 6> dx;
+  dx << -rho * Eigen::Matrix3d::Identity(), skew(x);
+  return dx;
+}
+
+// Pattern residuals for T_t_h; `fill(k, g, x, b)` writes the pose Jacobians of pixel k (g = dr/dx). Inverse depth
+// and affine Jacobians go to blocks rhoIndex, rhoIndex + 1, rhoIndex + 2; all blocks are zeroed first.
+template <typename Fill>
+void evaluatePattern(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3d& T_t_h,
+                     const double* const* parameters, int rhoIndex, int blocks, const int* blockSizes,
+                     double* residuals, double** jacobians, Fill fill) {
+  const double rho = parameters[rhoIndex][0];
+  const double *ah = parameters[rhoIndex + 1], *at = parameters[rhoIndex + 2];
+  const Eigen::Matrix3d R = T_t_h.rotationMatrix();
+  const Eigen::Vector3d& t = T_t_h.translation();
+  const double scale = std::exp(at[0] - ah[0]);
+  if (jacobians)
+    for (int i = 0; i < blocks; ++i)
+      if (jacobians[i]) std::fill_n(jacobians[i], kPatternSize * blockSizes[i], 0.0);
+  for (int k = 0; k < kPatternSize; ++k) {
+    const Eigen::Vector3d& b = p.pattern.bearings[k];
+    const Eigen::Vector3d x = R * b + rho * t;
+    Eigen::RowVector3d g;
+    if (!pixel(p, cam, image, k, x, scale, ah, at, residuals[k], jacobians ? &g : nullptr)) {
+      residuals[k] = 0;
+      continue;
+    }
+    if (!jacobians) continue;
+    fill(k, g, R, x, b, rho);
+    if (jacobians[rhoIndex]) jacobians[rhoIndex][k] = g.dot(t);
+    affineJacobians(p, k, scale, ah, jacobians, rhoIndex + 1, rhoIndex + 2);
+  }
+}
+
+void setRow(double** jacobians, int index, int k, const Eigen::Matrix<double, 1, 6>& row) {
+  if (jacobians[index]) Eigen::Map<Eigen::Matrix<double, 1, 6>>(jacobians[index] + 7 * k) = row;
+}
+
 }  // namespace
 
 bool SE3TangentManifold::Plus(const double* x, const double* delta, double* x_plus_delta) const {
@@ -139,6 +185,59 @@ bool StaticCost::Evaluate(const double* const* parameters, double* residuals, do
     if (jacobians[0]) jacobians[0][k] = g.dot(t);
     affineJacobians(*m_point, k, scale, ah, jacobians, 1, 2);
   }
+  return true;
+}
+
+bool TemporalExtrinsicCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
+  const Eigen::Map<const Sophus::SE3d> T_w_h(parameters[0]), T_w_t(parameters[1]);
+  const Eigen::Map<const Sophus::SE3d> T_b_ch(parameters[2]), T_b_ct(parameters[3]);
+  const Sophus::SE3d T_ct_b = T_b_ct.inverse();
+  const Sophus::SE3d T_t_h = T_ct_b * T_w_t.inverse() * T_w_h * T_b_ch;
+  // Poses as in TemporalCost; extrinsics act directly on T_t_h (no adjoint): host T_t_h exp(xi), target
+  // exp(-xi) T_t_h.
+  const Eigen::Matrix<double, 6, 6> adjHost = T_b_ch.inverse().Adj(), adjTarget = T_ct_b.Adj();
+  static constexpr int sizes[] = {7, 7, 7, 7, 1, 2, 2};
+  evaluatePattern(*m_point, *m_cam, *m_image, T_t_h, parameters, 4, 7, sizes, residuals, jacobians,
+                  [&](int k, const Eigen::RowVector3d& g, const Eigen::Matrix3d& R, const Eigen::Vector3d& x,
+                      const Eigen::Vector3d& b, double rho) {
+                    const Eigen::Matrix<double, 1, 6> gh = g * hostSide(R, b, rho), gt = g * targetSide(x, rho);
+                    setRow(jacobians, 0, k, gh * adjHost);
+                    setRow(jacobians, 1, k, gt * adjTarget);
+                    setRow(jacobians, 2, k, gh);
+                    setRow(jacobians, 3, k, gt);
+                  });
+  return true;
+}
+
+bool TemporalSameCameraExtrinsicCost::Evaluate(const double* const* parameters, double* residuals,
+                                               double** jacobians) const {
+  const Eigen::Map<const Sophus::SE3d> T_w_h(parameters[0]), T_w_t(parameters[1]), T_b_c(parameters[2]);
+  const Sophus::SE3d T_c_b = T_b_c.inverse();
+  const Sophus::SE3d T_t_h = T_c_b * T_w_t.inverse() * T_w_h * T_b_c;
+  const Eigen::Matrix<double, 6, 6> adjHost = T_c_b.Adj(), adjTarget = T_c_b.Adj();
+  static constexpr int sizes[] = {7, 7, 7, 1, 2, 2};
+  // T_b_c exp(xi) enters on both sides: exp(-xi) T_t_h exp(xi).
+  evaluatePattern(*m_point, *m_cam, *m_image, T_t_h, parameters, 3, 6, sizes, residuals, jacobians,
+                  [&](int k, const Eigen::RowVector3d& g, const Eigen::Matrix3d& R, const Eigen::Vector3d& x,
+                      const Eigen::Vector3d& b, double rho) {
+                    const Eigen::Matrix<double, 1, 6> gh = g * hostSide(R, b, rho), gt = g * targetSide(x, rho);
+                    setRow(jacobians, 0, k, gh * adjHost);
+                    setRow(jacobians, 1, k, gt * adjTarget);
+                    setRow(jacobians, 2, k, gh + gt);
+                  });
+  return true;
+}
+
+bool StaticExtrinsicCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
+  const Eigen::Map<const Sophus::SE3d> T_b_ch(parameters[0]), T_b_ct(parameters[1]);
+  const Sophus::SE3d T_t_h = T_b_ct.inverse() * T_b_ch;
+  static constexpr int sizes[] = {7, 7, 1, 2, 2};
+  evaluatePattern(*m_point, *m_cam, *m_image, T_t_h, parameters, 2, 5, sizes, residuals, jacobians,
+                  [&](int k, const Eigen::RowVector3d& g, const Eigen::Matrix3d& R, const Eigen::Vector3d& x,
+                      const Eigen::Vector3d& b, double rho) {
+                    setRow(jacobians, 0, k, g * hostSide(R, b, rho));
+                    setRow(jacobians, 1, k, g * targetSide(x, rho));
+                  });
   return true;
 }
 

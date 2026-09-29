@@ -118,6 +118,62 @@ TEST(RigConfig, LoadsCamerasAndExtrinsics) {
   EXPECT_THROW(sdv::loadRigConfig(dir / "bad.yaml"), std::runtime_error);
 }
 
+TEST(RigConfig, LoadsAimRecord) {
+  const auto dir = tempDir("rig_config_aim");
+  std::ofstream(dir / "front.yaml") << "width: 200\nheight: 100\nfx: 80\nfy: 80\ncx: 99.5\ncy: 49.5\n";
+  const std::string pose = "    T_body_camera:\n      translation: [2.0, 0.1, 1.5]\n"
+                           "      rotation_matrix: [0, 0, 1, -1, 0, 0, 0, -1, 0]\n";
+  std::ofstream(dir / "rig.yaml") << "aim_record:\n  record: record\n  calibration: /abs/config.zip\n"
+                                     "cameras:\n  - name: F_FISHEYE_C\n    camera: front.yaml\n" + pose;
+  const sdv::RigConfig rig = sdv::loadRigConfig(dir / "rig.yaml");
+  EXPECT_EQ(rig.aimRecord, dir / "record");
+  EXPECT_EQ(rig.aimCalibration, std::filesystem::path("/abs/config.zip"));
+  ASSERT_EQ(rig.cameras.size(), 1u);
+  EXPECT_TRUE(rig.cameras[0].video.empty());
+  EXPECT_THROW(sdv::openRigStreams(rig, {"B_FISHEYE_C"}), std::invalid_argument);
+
+  // Per-camera videos and offsets do not mix with a recording.
+  std::ofstream(dir / "mixed.yaml") << "aim_record:\n  record: record\n  calibration: config.zip\n"
+                                       "cameras:\n  - name: F_FISHEYE_C\n    camera: front.yaml\n    frame_offset: 1\n" +
+                                           pose;
+  EXPECT_THROW(sdv::loadRigConfig(dir / "mixed.yaml"), std::runtime_error);
+
+  // Refined extrinsics written elsewhere: the pose is replaced, relative paths still resolve.
+  const Sophus::SE3d T(Sophus::SO3d::rotZ(0.01) * rig.cameras[0].T_b_c.so3(), Eigen::Vector3d(2.01, 0.1, 1.5));
+  std::filesystem::create_directories(dir / "out");
+  sdv::writeRigConfig(dir / "rig.yaml", {{"F_FISHEYE_C", T}}, dir / "out" / "refined.yaml");
+  const sdv::RigConfig refined = sdv::loadRigConfig(dir / "out" / "refined.yaml");
+  EXPECT_EQ(refined.aimRecord, dir / "record");
+  EXPECT_DOUBLE_EQ(refined.cameras[0].camera.camera.fx, 80.0);
+  EXPECT_LT((refined.cameras[0].T_b_c.matrix() - T.matrix()).cwiseAbs().maxCoeff(), 1e-9);
+
+  // image_width shrinks the camera (pixel-centre convention) before any run-time scale.
+  std::ofstream(dir / "scaled.yaml") << "aim_record:\n  record: record\n  calibration: config.zip\n"
+                                        "cameras:\n  - name: F_FISHEYE_C\n    camera: front.yaml\n"
+                                        "    image_width: 100\n" + pose;
+  const sdv::Camera& half = sdv::loadRigConfig(dir / "scaled.yaml").cameras[0].camera.camera;
+  EXPECT_EQ(half.width, 100);
+  EXPECT_EQ(half.height, 50);
+  EXPECT_DOUBLE_EQ(half.fx, 40.0);
+  EXPECT_DOUBLE_EQ(half.cx, 49.5);
+  EXPECT_DOUBLE_EQ(half.cy, 24.5);
+
+  // mask_inflate grows the masked area (rig-wide, per camera overridden) but not from the image border.
+  cv::Mat mask(100, 200, CV_8UC1, cv::Scalar(255));
+  mask.rowRange(80, 100).setTo(0);
+  cv::imwrite((dir / "mask.png").string(), mask);
+  std::ofstream(dir / "masked.yaml") << "width: 200\nheight: 100\nfx: 80\nfy: 80\ncx: 99.5\ncy: 49.5\nmask: mask.png\n";
+  std::ofstream(dir / "inflated.yaml") << "aim_record:\n  record: record\n  calibration: config.zip\nmask_inflate: 5\n"
+                                          "cameras:\n  - name: A\n    camera: masked.yaml\n" + pose +
+                                              "  - name: B\n    camera: masked.yaml\n    mask_inflate: 0\n" + pose;
+  const sdv::RigConfig inflated = sdv::loadRigConfig(dir / "inflated.yaml");
+  const cv::Mat& a = inflated.cameras[0].camera.mask;
+  EXPECT_EQ(a.at<std::uint8_t>(74, 100), 255);
+  EXPECT_EQ(a.at<std::uint8_t>(75, 100), 0);
+  EXPECT_EQ(a.at<std::uint8_t>(0, 0), 255);
+  EXPECT_EQ(inflated.cameras[1].camera.mask.at<std::uint8_t>(79, 100), 255);
+}
+
 TEST(CameraConfig, ScaleAndCropKeepProjectionsConsistent) {
   sdv::CameraConfig config;
   config.camera = sdv::Camera::eucm(300, 301, 330.2, 190.7, 0.6, 1.05, 660, 380);

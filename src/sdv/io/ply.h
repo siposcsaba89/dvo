@@ -8,6 +8,8 @@
 #include <Eigen/Core>
 #include <sophus/se3.hpp>
 
+#include <sdv/map_point.h>
+
 namespace sdv {
 
 using Rgb = std::array<uint8_t, 3>;
@@ -31,5 +33,14 @@ class PlyScene {
   std::vector<Rgb> m_rgb;
   std::vector<int32_t> m_edges;
 };
+
+// Vertices with colour of a PLY file (e.g. PlyScene's); vertices that edges use (trajectories, axes) are skipped.
+void readPlyPoints(const std::filesystem::path& file, std::vector<Eigen::Vector3d>& points, std::vector<Rgb>& colors);
+
+// Map points with their attributes as vertex properties (scalar fields in CloudCompare): source (0 active, 1
+// candidate, 2 semi-dense), camera, frame, u, v, distance, observations, sigma (relative depth sigma or interval)
+// and, with `keep`, kept (0/1).
+void writeMapPointsPly(const std::filesystem::path& file, const std::vector<MapPoint>& points,
+                       const std::vector<char>* keep = nullptr);
 
 }  // namespace sdv

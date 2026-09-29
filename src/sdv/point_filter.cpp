@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <stdexcept>
 
 namespace sdv {
 
@@ -30,6 +31,33 @@ std::vector<char> hasNeighbours(const std::vector<Eigen::Vector3d>& points, doub
     keep[i] = count >= minNeighbours;
   }
   return keep;
+}
+
+void voxelThin(std::vector<Eigen::Vector3d>& points, std::vector<std::array<std::uint8_t, 3>>& colors, double voxel) {
+  if (colors.size() != points.size()) throw std::invalid_argument("one colour per point required");
+  if (voxel <= 0) return;
+  struct Cell {
+    Eigen::Vector3d position = Eigen::Vector3d::Zero();
+    Eigen::Vector3d color = Eigen::Vector3d::Zero();
+    int count = 0;
+  };
+  std::map<std::array<long long, 3>, Cell> grid;
+  for (size_t i = 0; i < points.size(); ++i) {
+    Cell& c = grid[{static_cast<long long>(std::floor(points[i].x() / voxel)),
+                    static_cast<long long>(std::floor(points[i].y() / voxel)),
+                    static_cast<long long>(std::floor(points[i].z() / voxel))}];
+    c.position += points[i];
+    c.color += Eigen::Vector3d(colors[i][0], colors[i][1], colors[i][2]);
+    ++c.count;
+  }
+  points.clear();
+  colors.clear();
+  for (const auto& [key, c] : grid) {
+    points.push_back(c.position / c.count);
+    const Eigen::Vector3d rgb = c.color / c.count;
+    colors.push_back({static_cast<std::uint8_t>(std::lround(rgb.x())), static_cast<std::uint8_t>(std::lround(rgb.y())),
+                      static_cast<std::uint8_t>(std::lround(rgb.z()))});
+  }
 }
 
 }  // namespace sdv

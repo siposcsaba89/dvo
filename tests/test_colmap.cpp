@@ -1,3 +1,4 @@
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -5,9 +6,14 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <sdv/io/colmap.h>
+#include <sdv/io/colmap_export.h>
 #include <sdv/undistort.h>
+
+#include <synthetic_scene.h>
 
 namespace {
 
@@ -81,4 +87,80 @@ TEST(Undistort, MapsPinholePixelsToFisheyePixelsOfTheSameRay) {
     EXPECT_NEAR(map.mapY.at<float>(v, u), expected.y(), 1e-3);
     EXPECT_LT((expected - uvFish).norm(), 1.5);
   }
+}
+
+TEST(Colmap, ExportedPoseAndPinholeMatchTheEucmCamera) {
+  const auto dir = std::filesystem::temp_directory_path() / "sdv_colmap_export_test";
+  std::filesystem::remove_all(dir);
+  const sdv::Camera cam = sdv::Camera::eucm(140, 140, 160.2, 119.7, 0.6, 1.1, 320, 240);
+  const Sophus::SE3d T_c_b = synthetic::room::cameraFromBody(0.3, {0.5, 0.2, 0.5});
+  const Sophus::SE3d T_w_b = Sophus::SE3d::exp((Sophus::Vector6d() << 0.4, -0.3, 0.1, 0.0, 0.0, 0.2).finished());
+  const Sophus::SE3d T_c_w = T_c_b * T_w_b.inverse();
+  cv::Mat render = synthetic::room::render(cam, T_c_w);
+  cv::GaussianBlur(render, render, cv::Size(0, 0), 1.5);
+  cv::Mat image;
+  render.convertTo(image, CV_8U);
+
+  // A wall point seen at a pixel off the image centre, where EUCM and the pinhole differ.
+  const Eigen::Vector2d uvEucm(215, 150);
+  Eigen::Vector3d bearing;
+  ASSERT_TRUE(cam.unproject(uvEucm, bearing));
+  const Eigen::Vector3d X = T_c_w.inverse() * (bearing / synthetic::room::trueRho(T_c_w, bearing));
+  {
+    sdv::ColmapExporter exporter(dir, {{"front", cam, T_c_b}});
+    exporter.addFrame(7, {image}, T_w_b, {{0.1, 5.0}});
+    exporter.write({{X, {1, 2, 3}, 7, 0}});
+  }
+  const auto images = dataLines(dir / "sparse" / "0" / "images.txt");
+  ASSERT_EQ(images.size(), 2u);
+  std::istringstream pose(images[0]);
+  int id, cameraId;
+  double qw, qx, qy, qz, tx, ty, tz;
+  std::string name;
+  pose >> id >> qw >> qx >> qy >> qz >> tx >> ty >> tz >> cameraId >> name;
+  EXPECT_EQ(name, "front/000007.png");
+  const Sophus::SE3d T(Eigen::Quaterniond(qw, qx, qy, qz).normalized(), Eigen::Vector3d(tx, ty, tz));
+  EXPECT_LT((T.matrix() - T_c_w.matrix()).cwiseAbs().maxCoeff(), 1e-5);
+
+  // The track pixel in the undistorted image shows what the EUCM image shows at the point.
+  std::istringstream track(images[1]);
+  double u, v;
+  track >> u >> v;
+  const cv::Mat exported = cv::imread((dir / "images" / name).string(), cv::IMREAD_GRAYSCALE);
+  ASSERT_FALSE(exported.empty());
+  cv::Mat a, b;
+  cv::getRectSubPix(exported, {1, 1}, cv::Point2f(static_cast<float>(u), static_cast<float>(v)), a);
+  cv::getRectSubPix(image, {1, 1}, cv::Point2f(215, 150), b);
+  EXPECT_NEAR(a.at<std::uint8_t>(0, 0), b.at<std::uint8_t>(0, 0), 3);
+  EXPECT_GT(std::hypot(u - uvEucm.x(), v - uvEucm.y()), 3.0);  // the undistortion moved it
+
+  const auto exposure = dataLines(dir / "exposure.txt");
+  ASSERT_EQ(exposure.size(), 1u);
+  EXPECT_EQ(exposure[0], "front/000007.png 0.100000 5.0000");
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Colmap, ExportCropsWidePinholesToTheMaxFov) {
+  const auto dir = std::filesystem::temp_directory_path() / "sdv_colmap_fov_test";
+  std::filesystem::remove_all(dir);
+  const sdv::Camera cam = sdv::Camera::eucm(100, 100, 159.5, 119.5, 0.6, 1.1, 320, 240);  // pinhole 116 x 100 deg
+  sdv::ColmapExportSettings settings;
+  settings.maxFovDeg = 90;
+  {
+    sdv::ColmapExporter exporter(dir, {{"", cam, Sophus::SE3d()}}, settings);
+    exporter.write({});
+  }
+  const auto cameras = dataLines(dir / "sparse" / "0" / "cameras.txt");
+  ASSERT_EQ(cameras.size(), 1u);
+  std::istringstream line(cameras[0]);
+  int id, w, h;
+  std::string model;
+  double fx, fy, cx, cy;
+  line >> id >> model >> w >> h >> fx >> fy >> cx >> cy;
+  EXPECT_EQ(w, 201);  // 2 * 100 * tan(45 deg) + 1
+  EXPECT_EQ(h, 201);
+  EXPECT_DOUBLE_EQ(fx, 100.0);
+  EXPECT_DOUBLE_EQ(cx, 100.0);
+  EXPECT_LE(2 * std::atan((w - 1) / 2.0 / fx) * 180 / M_PI, 90.0 + 1e-9);
+  std::filesystem::remove_all(dir);
 }

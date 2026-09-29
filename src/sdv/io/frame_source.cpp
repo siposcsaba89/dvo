@@ -5,6 +5,9 @@
 #include <stdexcept>
 
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include <sdv/aimrec/recording.h>
 
 namespace sdv {
 
@@ -50,6 +53,37 @@ cv::Mat SubsampledSource::next() {
   for (; skip > 0; --skip)
     if (!m_source->skip()) return {};
   return m_source->next();
+}
+
+bool SubsampledSource::skip() {
+  size_t n = m_started ? m_stride : m_start + 1;
+  m_started = true;
+  for (; n > 0; --n)
+    if (!m_source->skip()) return false;
+  return true;
+}
+
+cv::Mat ScaledSource::next() {
+  cv::Mat image = m_source->next();
+  if (image.empty() || m_scale == 1.0) return image;
+  cv::Mat out;
+  cv::resize(image, out, {}, m_scale, m_scale, cv::INTER_AREA);
+  return out;
+}
+
+AimRecordSource::AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera)
+    : m_recording(std::move(recording)), m_camera(camera) {}
+
+cv::Mat AimRecordSource::next() {
+  const auto& ids = m_recording->syncedFrameIds();
+  if (m_next >= ids.size()) return {};
+  return m_recording->stream(m_camera).decodeFrameId(ids[m_next++], aimrec::ImageFormat::Bgr);
+}
+
+bool AimRecordSource::skip() {
+  if (m_next >= m_recording->syncedFrameIds().size()) return false;
+  ++m_next;
+  return true;
 }
 
 void SubsampledSource::rewind() {
