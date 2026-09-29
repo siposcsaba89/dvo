@@ -1,6 +1,6 @@
 // COLMAP text model of a finished rig run for Gaussian Splatting (gsplat): the frames where the vehicle moved or turned
 // enough since the last exported one (standing frames repeat a view), for the chosen rig cameras, the corrected body poses (close_loops --out) with the rig extrinsics, points3D from a point cloud
-// (close_loops --ply, voxel-thinned) and, with close_loops --brightness-out, exposure.txt.
+// (close_loops --ply; neighbour-filtered against floating points, voxel-thinned) and, with close_loops --brightness-out, exposure.txt.
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
@@ -62,7 +62,8 @@ int main(int argc, char** argv) {
   std::string rigFile, posesFile, cloudFile, outDir, brightnessFile, format = "jpg";
   std::vector<std::string> runCameras, exportCameras;
   double scale = 1.0, focalScale = 1.0, maxFov = 100.0, voxel = 0.03, minTravel = 0.25, minRotationDeg = 5.0;
-  int start = 0, stride = 1, frameStride = 1;
+  int start = 0, stride = 1, frameStride = 1, minNeighbours = 10;
+  double neighbourRadius = 0.2;
   bool correctBrightness = false;
 
   po::options_description desc("export_colmap options");
@@ -73,6 +74,10 @@ int main(int argc, char** argv) {
       ("cameras", po::value(&exportCameras)->multitoken(), "rig cameras to export (default: those of the run)")
       ("poses", po::value(&posesFile)->required(), "body poses of all run frames (close_loops --out)")
       ("cloud", po::value(&cloudFile), "point cloud PLY for points3D (close_loops --ply)")
+      ("min-neighbours", po::value(&minNeighbours)->default_value(minNeighbours),
+       "points3D: keep points with this many others within --neighbour-radius (0 = off); stricter than close_loops' "
+       "3, against floating points that would seed floaters")
+      ("neighbour-radius", po::value(&neighbourRadius)->default_value(neighbourRadius), "neighbour radius, m")
       ("voxel", po::value(&voxel)->default_value(voxel), "thin points3D to one point per voxel, m (0 = off)")
       ("brightness", po::value(&brightnessFile), "close_loops --brightness-out: writes exposure.txt")
       ("correct-brightness", po::bool_switch(&correctBrightness),
@@ -179,8 +184,15 @@ int main(int argc, char** argv) {
       std::vector<sdv::Rgb> rgb;
       sdv::readPlyPoints(cloudFile, xyz, rgb);
       const size_t read = xyz.size();
+      const std::vector<char> keep = sdv::hasNeighbours(xyz, neighbourRadius, minNeighbours);
+      size_t kept = 0;
+      for (size_t i = 0; i < xyz.size(); ++i)
+        if (keep[i]) xyz[kept] = xyz[i], rgb[kept] = rgb[i], ++kept;
+      xyz.resize(kept);
+      rgb.resize(kept);
       sdv::voxelThin(xyz, rgb, voxel);
-      spdlog::info("points3D: {} of {} points ({:.3f} m voxels)", xyz.size(), read, voxel);
+      spdlog::info("points3D: {} of {} points ({}+ neighbours within {:.2f} m: {}; {:.3f} m voxels)", xyz.size(), read,
+                   minNeighbours, neighbourRadius, kept, voxel);
       for (size_t i = 0; i < xyz.size(); ++i) points.push_back({xyz[i], rgb[i]});
     }
     exporter.write(points);

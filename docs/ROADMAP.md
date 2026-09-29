@@ -345,7 +345,9 @@ COLMAP export (`export_colmap`, `ColmapExporter` shared with `run_vo --colmap`):
 poses, a cloud PLY, optionally `close_loops --brightness-out`), frames selected by motion (0.25 m or 5 deg since the
 last exported one: 456 of 3286 garage frames, a third of the recording is standing), EUCM cameras undistorted to
 virtual pinholes of the same focal length cropped to 100 deg per axis (at 132 deg the fisheye edges were stretched
-4.5x, at 100 deg ~2x), masks, points3D voxel-thinned (3 cm: 5.30M -> 1.96M), exposure.txt. Garage, all 8 cameras at
+4.5x, at 100 deg ~2x), masks, points3D with the stricter neighbour filter (10 within 0.2 m, against floating
+points seeding floaters; close_loops keeps 3 so its PLY stays complete) and voxel-thinned (3 cm: 5.35M -> 5.30M ->
+1.96M), exposure.txt. Garage, all 8 cameras at
 full rig resolution: 3648 images, 763 MB, 2 min. Points projected through the exported model land on the image
 structure in every camera. Open: OPENCV_FISHEYE (Kannala-Brandt) for the fisheyes' full field of view in 3DGUT,
 masks in the gsplat loss (the ego vehicle is black in the images), gsplat training (step 22).
