@@ -409,7 +409,19 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   scale is only a Umeyama fit of its poses to ours, overridden per image by the alignment anyway). The scale
   prior replaced solid fits (F_CTCAM_L on the ramp 1.33 from 1800 points, 92 % inliers -> 1.0): now only fits
   with < `--trust_points` 500 points or < `--trust_inliers` 0.6 are replaced. F_CTCAM_L on the ramp (frames
-  1000-1040) still reads 0.77 in the check although its fit says 1.29-1.34: open (visibility of a bare ramp wall?).
+  1000-1040) still reads 0.77 in the check although its fit says 1.29-1.34 (point/mono median 1.325 at frame 1004:
+  the fit is right there; the check's point selection differs).
+  Correction of the single-image verdict: its first alignment was unfair, the scale prior replaced 322 of 715 good
+  fits (single-image scales are arbitrary per image, so jumps are normal). Fair (`--prescale --ref_frames 60`,
+  solid fits kept): about as good as multi-view where there are points (upper level 0.99-1.00 per camera, power
+  fit 1.000; cameras 3.5-4.5 cm), worse on the ramp (16-24 cm): there the right cameras see a bare wall at 2.3 m
+  with 6-10 trusted points per image (B_MIDRANGECAM_C, M_NEIGHBORLANECAM_L ~400-540), the trusted filter
+  (>= 20 observations) drops 95-99 % of the ramp's points (median 7-12 observations). `align_depth.py` fits now
+  start at the consensus value (exact 1-D RANSAC: the densest +-5 % window) instead of the median, and the power fit's
+  prior on b is fixed (it scaled with the depth spread, so narrow spreads ran b to its 0.5 limit). Single-image
+  power fit with `--min_obs 8 --max_sigma 0.006`: upper level cameras 2.7-2.8 cm (multi-view 3.0-3.1), the worst
+  upper window 6.7 cm (was 27-35), outside 4.6 cm; the ramp stays open (F_CTCAM_L 0.74, M_NEIGHBORLANECAM_R 1.36:
+  no points to fit the right cameras to). Single-image DA3-Large is ~8x faster than multi-view BASE.
   Dense subset 0.1 m (first build, old alignment): test 33.93 (60 k subset 32.52, full 30.88), outside 0-500 31.69,
   upper 1000-1500 34.39; "the best model so far" by eye. Rebuild with the fixed alignment: `sub_d10b`.
   Balanced sampling (3 m) at 120 k steps: no image is skipped; uniform would draw each training image 13.5 times,
