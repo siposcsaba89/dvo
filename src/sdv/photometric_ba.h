@@ -33,6 +33,16 @@ struct PhotometricBASettings {
   double odometrySigmaFactor = 10.0;  // weak odometry edges (0 = off)
   PoseGraphSettings odometry;
   int rounds = 2;
+  // > 0: bounded memory by block-coordinate descent over blocks of this many consecutive keyframes (their poses,
+  // brightness and hosted inverse depths; the rest fixed), blockSweeps sweeps per round with borders shifted by half
+  // a block. 0: one joint problem.
+  int blockKeyframes = 0;
+  int blockSweeps = 2;
+  size_t blockCoarseResiduals = 3000000;
+  // Linear solver: sparse Schur with Eigen's (single-threaded) Cholesky, AMD or nested-dissection ordering; or
+  // iterative Schur (conjugate gradients, Schur-Jacobi preconditioner, multi-threaded, for large problems).
+  enum class Solver { SparseAmd, SparseNesdis, Iterative };
+  Solver solver = Solver::SparseAmd;  // before the blocks: one joint solve with every m-th point within this
   int iterations = 30;
   PhotometricSettings photometric;
   // Optional: also refine the rig extrinsics T_c_b (one per camera, shared by all keyframes; camera 0 stays fixed as

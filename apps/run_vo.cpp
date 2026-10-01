@@ -39,7 +39,7 @@
 namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
-  std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, jsonFile, pngFile,
+  std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, trajectoryPlyFile, jsonFile, pngFile,
       colmapDir, keyframesFile, loopVocabulary, loopsFile;
   std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
       ("gt", po::value(&gtFile), "ground-truth poses for evaluation (KITTI format, one per input frame)")
       ("out,o", po::value(&outFile), "write estimated poses (KITTI format, frames with a pose)")
       ("ply", po::value(&plyFile), "write trajectory, GT and map points (Sim3-aligned to GT if given)")
+      ("trajectory-ply", po::value(&trajectoryPlyFile),
+       "write only the trajectory (and GT): fast, without the map points and their colour pass over the input")
       ("colmap", po::value(&colmapDir), "write a COLMAP text model (sparse/0) and images to this directory")
       ("colmap-keyframes", po::bool_switch(&colmapKeyframesOnly), "export keyframes only")
       ("colmap-align", po::bool_switch(&colmapAlign), "export in the GT-aligned frame (metres)")
@@ -524,10 +526,15 @@ int main(int argc, char** argv) {
       for (int frame = 0; frame <= lastFrame; ++frame) {
         bool ended = false;
         for (int c = 0; c < rig.size() && !ended; ++c) {
+          // Only images that host points are decoded (recordings skip for free; the others decode anyway).
+          const auto it = pointsOfImage.find({frame, c});
+          if (it == pointsOfImage.end()) {
+            ended = !inputs[c].source->skip();
+            continue;
+          }
           const cv::Mat input = inputs[c].source->next();
           if (input.empty()) ended = true;
-          const auto it = pointsOfImage.find({frame, c});
-          if (ended || it == pointsOfImage.end() || input.channels() != 3) continue;
+          if (ended || input.channels() != 3) continue;
           cv::Mat img = sdv::prepareImage(input, scale, inputs[c].camera);
           if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
           for (size_t i : it->second) {
@@ -540,6 +547,15 @@ int main(int argc, char** argv) {
       }
     }
 
+    if (!trajectoryPlyFile.empty()) {
+      sdv::PlyScene scene;
+      std::vector<Sophus::SE3d> aligned = est;
+      for (auto& p : aligned) p = alignment.applyToPose(p);
+      scene.addTrajectory(aligned, {220, 0, 0});
+      if (!gt.empty()) scene.addTrajectory(gt, {0, 200, 0});
+      scene.write(trajectoryPlyFile);
+      spdlog::info("wrote {}", trajectoryPlyFile);
+    }
     if (!plyFile.empty()) {
       sdv::PlyScene scene;
       std::vector<Sophus::SE3d> aligned = est;

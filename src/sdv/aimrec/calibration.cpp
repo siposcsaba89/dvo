@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <sstream>
@@ -167,12 +168,20 @@ VehicleCalibration loadCalibration(const std::filesystem::path& zipOrSensorConfi
     return calib;
   }
 
-  // Any entry .../VEHICLES/<vehicle>/sensorconfig.yaml; its directory anchors the mask paths.
+  // Any entry .../VEHICLES/<vehicle>/sensorconfig.yaml; its directory anchors the mask paths. Zips written on
+  // Windows name their entries with backslashes: entries are matched by their name with forward slashes.
   const ZipPtr zip = openZip(zipOrSensorConfig);
+  const auto slashes = [](std::string s) {
+    std::ranges::replace(s, '\\', '/');
+    return s;
+  };
+  std::map<std::string, std::string> entries;  // name with forward slashes -> name in the zip
   std::vector<std::pair<std::string, std::string>> found;  // (entry, vehicle)
   const zip_int64_t n = zip_get_num_entries(zip.get(), 0);
   for (zip_int64_t i = 0; i < n; ++i) {
-    const std::string entry = zip_get_name(zip.get(), static_cast<zip_uint64_t>(i), 0);
+    const std::string raw = zip_get_name(zip.get(), static_cast<zip_uint64_t>(i), 0);
+    const std::string entry = slashes(raw);
+    entries.emplace(entry, raw);
     const std::filesystem::path p(entry);
     if (p.filename() != "sensorconfig.yaml" || p.parent_path().parent_path().filename() != "VEHICLES") continue;
     const std::string v = p.parent_path().filename().string();
@@ -184,14 +193,18 @@ VehicleCalibration loadCalibration(const std::filesystem::path& zipOrSensorConfi
     throw std::runtime_error(name + " has no VEHICLES/" + (vehicle.empty() ? "*" : vehicle) + "/sensorconfig.yaml");
   if (found.size() > 1) throw std::runtime_error(name + " holds several vehicles; name one");
 
+  const auto read = [&](const std::string& entry) -> std::optional<std::vector<std::uint8_t>> {
+    const auto it = entries.find(entry);
+    return it == entries.end() ? std::nullopt : readZipEntry(zip.get(), it->second);
+  };
   const auto& [entry, v] = found.front();
-  const auto bytes = readZipEntry(zip.get(), entry);
+  const auto bytes = read(entry);
   if (!bytes) throw std::runtime_error("cannot read " + entry + " from " + name);
   calib.vehicle = v;
   calib.cameras = parseSensorConfig(std::string(bytes->begin(), bytes->end()), name + ":" + entry);
   const std::string dir = std::filesystem::path(entry).parent_path().generic_string();
   for (auto& c : calib.cameras)
-    if (wantsMask(c)) attachMask(c, readZipEntry(zip.get(), dir + "/" + c.maskFile));
+    if (wantsMask(c)) attachMask(c, read(dir + "/" + slashes(c.maskFile)));
   return calib;
 }
 

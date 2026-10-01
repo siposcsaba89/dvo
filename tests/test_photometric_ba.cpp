@@ -151,3 +151,32 @@ TEST(PhotometricBA, RefinesPerturbedKeyframePosesAndDepths) {
     EXPECT_LT(err.so3().log().norm(), 0.0007) << "keyframe " << k;
   }
 }
+
+// Blocks of 4 keyframes (the rest fixed per block, borders shifted between sweeps) after a coarse joint solve on
+// every 5th point reach the joint solution; without the coarse solve they drift ~0.5 mm per keyframe.
+TEST(PhotometricBA, BlocksMatchTheJointAdjustment) {
+  const sdv::Rig rig = surroundRig();
+  std::mt19937 rng(7);
+  const SyntheticRun run = renderRun(rig, rng, 12);
+  std::normal_distribution<double> noise(0.0, 1.0);
+  std::vector<Sophus::SE3d> initial = run.truth;
+  for (size_t k = 1; k < initial.size(); ++k)
+    initial[k] = initial[k] * Sophus::SE3d::exp((Sophus::Vector6d() << 0.01 * noise(rng), 0.01 * noise(rng),
+                                                 0.01 * noise(rng), 0.002 * noise(rng), 0.002 * noise(rng),
+                                                 0.002 * noise(rng)).finished());
+  sdv::PhotometricBASettings settings;
+  settings.odometrySigmaFactor = 0;
+  settings.maxInitialPixelError = 40.0;
+  const auto joint = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
+  settings.blockKeyframes = 4;
+  settings.blockCoarseResiduals = 30000;  // every 5th point in the coarse joint solve
+  const auto blocks = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
+  EXPECT_GT(blocks.residuals, 0.95 * joint.residuals);
+  EXPECT_LT(blocks.rmseAfter, 1.02 * joint.rmseAfter);
+  for (size_t k = 0; k < run.truth.size(); ++k) {
+    const Sophus::SE3d err = blocks.T_w_b[k] * run.truth[k].inverse();
+    EXPECT_LT(err.translation().norm(), 0.002) << "keyframe " << k;  // joint: < 0.6 mm, 0.1 mrad
+    EXPECT_LT(err.so3().log().norm(), 0.0002) << "keyframe " << k;
+  }
+  ASSERT_EQ(blocks.pointDepthSigma.size(), joint.pointDepthSigma.size());
+}

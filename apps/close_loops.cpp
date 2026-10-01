@@ -136,6 +136,7 @@ int main(int argc, char** argv) {
   sdv::PoseGraphSettings graphSettings;
   sdv::GlobalBASettings baSettings;
   sdv::PhotometricBASettings pbaSettings;
+  std::string pbaSolver;
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -177,6 +178,17 @@ int main(int argc, char** argv) {
        "closest revisit keyframes per host")
       ("pba-cross-targets", po::value(&pbaSettings.maxCrossTargets)->default_value(pbaSettings.maxCrossTargets),
        "loop and revisit target keyframes per point, the closest (0 = all)")
+      ("pba-block-keyframes", po::value(&pbaSettings.blockKeyframes)->default_value(pbaSettings.blockKeyframes),
+       "photometric BA in blocks of this many consecutive keyframes, the rest fixed (bounded memory for long runs; "
+       "0 = one joint problem)")
+      ("pba-block-sweeps", po::value(&pbaSettings.blockSweeps)->default_value(pbaSettings.blockSweeps),
+       "sweeps over the blocks per round, borders shifted by half a block")
+      ("pba-solver", po::value(&pbaSolver)->default_value("sparse"),
+       "photometric BA linear solver: sparse (Eigen Cholesky, AMD), nesdis (nested dissection), iterative (CG, "
+       "multi-threaded)")
+      ("pba-block-coarse-residuals",
+       po::value(&pbaSettings.blockCoarseResiduals)->default_value(pbaSettings.blockCoarseResiduals),
+       "with blocks: first a joint solve over all keyframes with every m-th point, at most this many residuals")
       ("pba-extrinsics", po::bool_switch(&pbaSettings.refineExtrinsics),
        "photometric BA: also refine the rig extrinsics (first camera fixed); see --rig-out")
       ("pba-extrinsic-sigma-t", po::value(&pbaSettings.extrinsicSigmaT)->default_value(pbaSettings.extrinsicSigmaT),
@@ -239,6 +251,11 @@ int main(int argc, char** argv) {
     }
     po::notify(vm);
     if (up.size() != 3) throw po::error("--up takes 3 values");
+    using Solver = sdv::PhotometricBASettings::Solver;
+    if (pbaSolver == "sparse") pbaSettings.solver = Solver::SparseAmd;
+    else if (pbaSolver == "nesdis") pbaSettings.solver = Solver::SparseNesdis;
+    else if (pbaSolver == "iterative") pbaSettings.solver = Solver::Iterative;
+    else throw po::error("--pba-solver: sparse, nesdis or iterative");
   } catch (const po::error& e) {
     spdlog::error("{}", e.what());
     std::cout << desc << '\n';
@@ -352,6 +369,11 @@ int main(int argc, char** argv) {
       return out;
     };
     poses = correct(after);
+    // Final already: written before the densify, so the trajectory can be checked while that runs.
+    if (!outFile.empty()) {
+      sdv::saveKittiPoses(outFile, poses);
+      spdlog::info("wrote {}", outFile);
+    }
     if (!gtFile.empty()) {
       const auto allGt = sdv::loadKittiPoses(gtFile);
       std::vector<Sophus::SE3d> gt;
@@ -587,10 +609,6 @@ int main(int argc, char** argv) {
       }
       scene.write(plyFile);
       spdlog::info("wrote {}", plyFile);
-    }
-    if (!outFile.empty()) {
-      sdv::saveKittiPoses(outFile, poses);
-      spdlog::info("wrote {}", outFile);
     }
   } catch (const std::exception& e) {
     spdlog::error("{}", e.what());
