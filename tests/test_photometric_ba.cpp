@@ -100,6 +100,59 @@ TEST(PhotometricBA, RefinesPerturbedExtrinsicsOnlyWhenAsked) {
   EXPECT_TRUE(sawLeftStatic);
 }
 
+TEST(PhotometricBA, FixedRigScaleLetsTranslationsMove) {
+  const sdv::Rig truthRig = surroundRig();
+  std::mt19937 rng(5);
+  const SyntheticRun run = renderRun(truthRig, rng, 8);
+  // Left camera 4 cm off (with 1 deg), translations only weakly held: the sum of the camera distances stays.
+  sdv::Rig rig = truthRig;
+  rig.T_c_b[1] = Sophus::SE3d(Sophus::SO3d::rotY(0.0175), Eigen::Vector3d(0.04, 0, 0)) * truthRig.T_c_b[1];
+  sdv::PhotometricBASettings settings;
+  settings.odometrySigmaFactor = 0;
+  settings.maxInitialPixelError = 40.0;
+  settings.refineExtrinsics = true;
+  settings.extrinsicSigmaT = 0.1;
+  settings.extrinsicFixScale = true;
+  const auto refined = sdv::photometricBundleAdjust(rig, run.records, run.images, run.truth, {}, settings);
+  auto sumOfDistances = [](const std::vector<Sophus::SE3d>& T_c_b) {
+    double s = 0;
+    for (size_t i = 0; i < T_c_b.size(); ++i)
+      for (size_t j = i + 1; j < T_c_b.size(); ++j)
+        s += (T_c_b[i].inverse().translation() - T_c_b[j].inverse().translation()).norm();
+    return s;
+  };
+  EXPECT_NEAR(sumOfDistances(refined.T_c_b), sumOfDistances(rig.T_c_b), 1e-4);
+  const Sophus::SE3d err = refined.T_c_b[1] * truthRig.T_c_b[1].inverse();
+  EXPECT_LT(err.so3().log().norm(), 0.0035);
+  EXPECT_LT(err.translation().norm(), 0.025);  // from 0.04
+}
+
+TEST(PhotometricBA, RefinesPerturbedIntrinsicsWithFixedExtrinsics) {
+  const sdv::Rig truthRig = surroundRig();
+  std::mt19937 rng(7);
+  const SyntheticRun run = renderRun(truthRig, rng, 8);
+  // The left camera's focal lengths 2 % and principal point 2 px off in the given rig.
+  sdv::Rig rig = truthRig;
+  rig.cameras[1].fx *= 1.02, rig.cameras[1].fy *= 1.02, rig.cameras[1].cx += 2.0, rig.cameras[1].cy -= 2.0;
+  sdv::PhotometricBASettings settings;
+  settings.odometrySigmaFactor = 0;
+  settings.maxInitialPixelError = 40.0;
+  settings.refineIntrinsics = true;
+  settings.intrinsicCameras = {1};
+  settings.intrinsicSigmaFocal = 0.05;
+  settings.intrinsicSigmaCenter = 5.0;
+  const auto refined = sdv::photometricBundleAdjust(rig, run.records, run.images, run.truth, {}, settings);
+  for (int c = 0; c < rig.size(); ++c)
+    EXPECT_TRUE((refined.T_c_b[c].matrix() - rig.T_c_b[c].matrix()).isZero(1e-12)) << "camera " << c;
+  EXPECT_EQ(refined.cameras[0].fx, rig.cameras[0].fx);
+  const sdv::Camera& k = refined.cameras[1];
+  const sdv::Camera& t = truthRig.cameras[1];
+  EXPECT_LT(std::abs(k.fx / t.fx - 1), 0.005);
+  EXPECT_LT(std::abs(k.fy / t.fy - 1), 0.005);
+  EXPECT_LT(std::abs(k.cx - t.cx), 0.7);
+  EXPECT_LT(std::abs(k.cy - t.cy), 0.7);
+}
+
 TEST(PhotometricBA, RefinesPerturbedKeyframePosesAndDepths) {
   const sdv::Rig rig = surroundRig();
   sdv::PointSelectorSettings selector;

@@ -10,6 +10,13 @@
 #   GS_CAMS    densify, export and GS cameras    ($VO_CAMS B_MIDRANGECAM_C)
 #   DA3_GROUPS multi-view DA3 passes, "window cameras:saved cameras" separated by ";" (a window holds at most
 #              4 cameras x 7 frames on a 16 GB GPU)
+#   VO_ARGS    extra run_vo options (--trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5)
+#   DENSIFY_ARGS  extra close_loops densify options (--densify-min-quality 3 --free-space; add --densify-verify for a
+#              cleaner but ~40 % smaller cloud)
+#   REFINE_RIG=1  refine the rig extrinsics first (metric scale held) (stage rig, first RIG_FRAMES=3000 frames) and run everything with
+#              rig/rig_refined.yaml; for rigs with a camera that is off (6 cameras with F_MIDRANGECAM_C: 0.16 deg).
+#              RIG_POINTS (120) points per keyframe image in that BA: ~3.5 KB per residual, Chili 6 cameras
+#              2500 frames at 120: 4.6 M residuals, 16 GB; at 60 about half
 #   FORWARD, HEIGHT  fly-by camera offset from the body origin, m (CT camera position of the vehicle)
 #   INIT_VOXEL initial Gaussians thinned to this voxel, m (default 0.08 above 5 M points, else all)
 #   STEPS      training steps (30000); CKPT_EVERY full checkpoint + previews every n steps (10000)
@@ -34,6 +41,9 @@ V=$DVO/results/voc_k10l5.fbow
 VO_CAMS=${VO_CAMS:-F_CTCAM_L F_CTCAM_R M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R}
 GS_CAMS=${GS_CAMS:-$VO_CAMS B_MIDRANGECAM_C}
 DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R:B_MIDRANGECAM_C"}
+# Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
+VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}
+DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space}
 FORWARD=${FORWARD:-1.55}
 HEIGHT=${HEIGHT:-1.50}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True HF_HUB_OFFLINE=1
@@ -46,8 +56,26 @@ test -f $R/rig/rig.yaml || { echo "no $R/rig/rig.yaml"; exit 1; }
 # WSL: the page cache of the run's files is not given back to Windows while busy and took the VM down; keep it small.
 $PY $DVO/tools/drop_cache.py $R --pid $$ --max_gb ${MAX_CACHE_GB:-8} >> $R/drop_cache.log 2>&1 &
 
+RIG=$R/rig/rig.yaml
+if [ "${REFINE_RIG:-0}" = 1 ]; then
+    # Rig extrinsics from a photometric BA over the first RIG_FRAMES frames: the sum of the distances between the cameras
+    # is held (the metric scale), the cameras otherwise free (5 cm prior); the joint BA needs ~7 GB per 300 keyframes.
+    if stage rig; then
+        mkdir -p $R/rig_refine
+        [ -f $R/rig_refine/keyframes.kfr ] || $B/run_vo --rig $RIG --rig-cameras $VO_CAMS --scale 0.5 -n ${RIG_FRAMES:-3000} \
+            $VO_ARGS -o $R/rig_refine/poses.txt --keyframes-out $R/rig_refine/keyframes.kfr > $R/rig_refine/run_vo.log 2>&1
+        $B/close_loops --keyframes $R/rig_refine/keyframes.kfr --poses $R/rig_refine/poses.txt --vocabulary $V --rig $RIG \
+            --rig-cameras $VO_CAMS --scale 0.5 --photometric --pba-points ${RIG_POINTS:-120} --pba-extrinsics --pba-extrinsic-fix-scale \
+            --pba-extrinsic-sigma-t 0.05 \
+            --rig-out $R/rig/rig_refined.yaml --out $R/rig_refine/poses_loop.txt > $R/rig_refine/close_loops.log 2>&1
+        grep "extrinsic \|baseline " $R/rig_refine/close_loops.log | sed 's/^.*\] /    /'
+        rm -f $R/rig_refine/keyframes.kfr
+        done_ rig
+    fi
+    RIG=$R/rig/rig_refined.yaml
+fi
 if stage vo; then
-    $B/run_vo --rig $R/rig/rig.yaml --rig-cameras $VO_CAMS --scale 0.5 -o $R/poses.txt \
+    $B/run_vo --rig $RIG --rig-cameras $VO_CAMS --scale 0.5 $VO_ARGS -o $R/poses.txt \
         --keyframes-out $R/keyframes.kfr --png $R/odometry.png --trajectory-ply $R/odometry_trajectory.ply \
         > $R/run_vo.log 2>&1
     log "odometry: $R/odometry.png (top view with points), $R/odometry_trajectory.png (heights)"
@@ -62,8 +90,9 @@ if stage loops; then
     kf=$(grep -o "[0-9]* keyframes, [0-9]* features" $R/run_vo.log | tail -1 | cut -d' ' -f1)
     blocks=""
     [ "${kf:-0}" -gt 400 ] && blocks="--pba-block-keyframes 200"
-    $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
+    $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $RIG \
         --rig-cameras $VO_CAMS --scale 0.5 --photometric --pba-points 120 $blocks --densify --densify-cameras $GS_CAMS --merge \
+        $DENSIFY_ARGS \
         --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply > $R/diag/close_loops.log 2>&1
     # Without IMU "up" is the first frame's body up: level the map by the vehicle's mean up axis (ramps left out).
     $PY $DVO/tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply | sed 's/^/    /'
@@ -74,7 +103,7 @@ if stage loops; then
 fi
 if stage export; then
     rm -rf $C
-    $B/export_colmap --rig $R/rig/rig.yaml --rig-cameras $VO_CAMS --cameras $GS_CAMS --poses $R/diag/poses_loop.txt \
+    $B/export_colmap --rig $RIG --rig-cameras $VO_CAMS --cameras $GS_CAMS --poses $R/diag/poses_loop.txt \
         --cloud $R/diag/cloud.ply --scale 0.5 --out $C > $R/export_colmap.log 2>&1
     done_ export
 fi

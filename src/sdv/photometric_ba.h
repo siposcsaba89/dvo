@@ -51,6 +51,18 @@ struct PhotometricBASettings {
   bool refineExtrinsics = false;
   double extrinsicSigmaT = 0.05;     // m
   double extrinsicSigmaRDeg = 2.0;
+  // With refineExtrinsics: hold the sum of the distances between all camera centres (the metric scale of the rig) at
+  // its input value, so that the translations can move freely otherwise (with extrinsicSigmaT as a weak prior).
+  bool extrinsicFixScale = false;
+  // Optional: also refine the intrinsics (fx, fy, cx, cy, alpha, beta) of these cameras (empty = all), with a prior
+  // towards the rig cameras; the extrinsics enter as with refineExtrinsics (held fixed without it). Fixed camera
+  // translations keep the metric scale.
+  bool refineIntrinsics = false;
+  std::vector<int> intrinsicCameras;
+  double intrinsicSigmaFocal = 0.01;  // relative
+  double intrinsicSigmaCenter = 2.0;  // px
+  double intrinsicSigmaAlpha = 0.02;
+  double intrinsicSigmaBeta = 0.05;
 };
 
 // Photometric rmse per pattern pixel of the residuals from camera `host` into camera `target`, over the residuals
@@ -77,6 +89,7 @@ struct PhotometricBAResult {
   double rmseBefore = 0, rmseAfter = 0;  // intensity per pattern pixel over the used residuals
   int iterations = 0;
   std::vector<Sophus::SE3d> T_c_b;  // rig extrinsics after the adjustment (the input ones without refineExtrinsics)
+  std::vector<Camera> cameras;  // rig cameras after the adjustment (the input ones without refineIntrinsics)
   std::vector<CameraPairError> cameraPairs;
 };
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include <ceres/ceres.h>
@@ -107,6 +108,55 @@ class StaticExtrinsicCost : public ceres::SizedCostFunction<kPatternSize, 7, 7, 
   const PointData* m_point;
   const Camera* m_cam;
   const Interpolator* m_image;
+};
+
+// One of the extrinsic costs above with intrinsics blocks (fx, fy, cx, cy, alpha, beta) appended: the host pattern
+// bearings come from the host intrinsics, the projection uses the target intrinsics. Parameters: those of the inner
+// cost, then the host intrinsics and, for two different cameras, the target intrinsics. The inner Jacobians are
+// analytic, the intrinsics ones central differences.
+enum class ExtrinsicCostKind { Temporal, TemporalSameCamera, Static };
+
+class CalibratedCost : public ceres::CostFunction {
+ public:
+  CalibratedCost(ExtrinsicCostKind kind, const PointData* point, const Camera* hostCam, const Camera* targetCam,
+                 const Interpolator* image);
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  bool evaluate(const double* const* parameters, const double* hostK, const double* targetK, double* residuals,
+                double** jacobians) const;
+
+  ExtrinsicCostKind m_kind;
+  const PointData* m_point;
+  const Camera* m_hostCam;
+  const Camera* m_targetCam;
+  const Interpolator* m_image;
+  int m_inner;  // parameter blocks of the inner cost
+};
+
+// Intrinsics (fx, fy, cx, cy, alpha, beta) of a camera with the given values, mask and size kept.
+Camera withIntrinsics(const Camera& cam, const double* k);
+
+// Prior (k - k0) / sigma on an intrinsics block.
+class IntrinsicPriorCost : public ceres::SizedCostFunction<6, 6> {
+ public:
+  IntrinsicPriorCost(const Camera& cam, const std::array<double, 6>& sigma);
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  std::array<double, 6> m_k0, m_sigma;
+};
+
+// Metric scale of a rig: (sum over camera pairs of |c_i - c_j| - sum0) / sigma, c the camera centre (translation of
+// T_b_c). Parameters: the T_b_c blocks of all cameras (7 each, SE3TangentManifold).
+class RigScaleCost : public ceres::CostFunction {
+ public:
+  RigScaleCost(int cameras, double sum0, double sigma);
+  bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
+
+ private:
+  int m_cameras;
+  double m_sum0, m_sigma;
 };
 
 // Relative pose prior log(T_a_b_measured^-1 T_w_a^-1 T_w_b) weighted by the sigmas, for SE3TangentManifold poses;

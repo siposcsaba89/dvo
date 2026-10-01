@@ -159,6 +159,12 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   // One residual (cost function and its parameter blocks) per candidate, shared by the joint and the blocked solve.
   std::vector<std::array<double, 7>> extrinsics(nc);
   for (int c = 0; c < nc; ++c) std::copy_n(rig.T_c_b[c].inverse().data(), 7, extrinsics[c].data());
+  std::vector<std::array<double, 6>> intrinsics(nc);
+  for (int c = 0; c < nc; ++c) {
+    const Camera& cam = rig.cameras[c];
+    intrinsics[c] = {cam.fx, cam.fy, cam.cx, cam.cy, cam.alpha, cam.beta};
+  }
+  const bool extrinsicCosts = settings.refineExtrinsics || settings.refineIntrinsics;
   struct Cost {
     std::unique_ptr<ceres::CostFunction> function;
     std::vector<double*> parameters;
@@ -174,12 +180,26 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     double* et = extrinsics[cd.cam].data();
     double* r = &rho[cd.point];
     const bool sameKeyframe = cd.target == p.host;
-    if (!settings.refineExtrinsics && sameKeyframe)
+    if (!extrinsicCosts && sameKeyframe)
       return Cost{std::make_unique<pba::StaticCost>(&p, cam, image, rig.T_c_b[cd.cam] * rig.T_c_b[p.hostCam].inverse()),
                   {r, ah, at}, 0};
-    if (!settings.refineExtrinsics)
+    if (!extrinsicCosts)
       return Cost{std::make_unique<pba::TemporalCost>(&p, cam, image, rig.T_c_b[cd.cam], rig.T_c_b[p.hostCam].inverse()),
                   {poses[p.host].data(), poses[cd.target].data(), r, ah, at}, 2};
+    if (settings.refineIntrinsics) {
+      const Camera* hostCam = &rig.cameras[p.hostCam];
+      double* kh = intrinsics[p.hostCam].data();
+      double* kt = intrinsics[cd.cam].data();
+      if (sameKeyframe)
+        return Cost{std::make_unique<pba::CalibratedCost>(pba::ExtrinsicCostKind::Static, &p, hostCam, cam, image),
+                    {eh, et, r, ah, at, kh, kt}, 2};
+      if (cd.cam == p.hostCam)
+        return Cost{std::make_unique<pba::CalibratedCost>(pba::ExtrinsicCostKind::TemporalSameCamera, &p, hostCam, cam,
+                                                          image),
+                    {poses[p.host].data(), poses[cd.target].data(), eh, r, ah, at, kh}, 3};
+      return Cost{std::make_unique<pba::CalibratedCost>(pba::ExtrinsicCostKind::Temporal, &p, hostCam, cam, image),
+                  {poses[p.host].data(), poses[cd.target].data(), eh, et, r, ah, at, kh, kt}, 4};
+    }
     if (sameKeyframe) return Cost{std::make_unique<pba::StaticExtrinsicCost>(&p, cam, image), {eh, et, r, ah, at}, 2};
     if (cd.cam == p.hostCam)
       return Cost{std::make_unique<pba::TemporalSameCameraExtrinsicCost>(&p, cam, image),
@@ -230,7 +250,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     // affine brightness, the inverse depths of the points it hosts with all their residuals, and the residuals of
     // outside points into it; everything outside the block stays fixed. Block borders shift by half a block between
     // sweeps. Residuals are evaluated without a global problem (same cost functions, loss not applied).
-    if (settings.refineExtrinsics) throw std::invalid_argument("photometric BA: blocks cannot refine the extrinsics");
+    if (extrinsicCosts) throw std::invalid_argument("photometric BA: blocks cannot refine the rig calibration");
     std::vector<Candidate> cands;
     for (const auto& list : perPoint) cands.insert(cands.end(), list.begin(), list.end());
     perPoint = {};
@@ -385,15 +405,45 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     // Extrinsics as T_b_c blocks (see pba::TemporalExtrinsicCost), used only with refineExtrinsics.
     std::array<double, 7> identity;
     std::copy_n(Sophus::SE3d().data(), 7, identity.data());
-    if (settings.refineExtrinsics) {
+    if (extrinsicCosts) {
       for (auto& e : extrinsics) problem.AddParameterBlock(e.data(), 7, new pba::SE3TangentManifold());
       problem.SetParameterBlockConstant(extrinsics[0].data());
+      if (!settings.refineExtrinsics)
+        for (auto& e : extrinsics) problem.SetParameterBlockConstant(e.data());
+    }
+    if (settings.refineIntrinsics) {
+      for (int c = 0; c < nc; ++c) {
+        problem.AddParameterBlock(intrinsics[c].data(), 6);
+        const auto& sel = settings.intrinsicCameras;
+        if (!sel.empty() && std::find(sel.begin(), sel.end(), c) == sel.end()) {
+          problem.SetParameterBlockConstant(intrinsics[c].data());
+          continue;
+        }
+        const Camera& cam = rig.cameras[c];
+        problem.AddResidualBlock(
+            new pba::IntrinsicPriorCost(cam, {settings.intrinsicSigmaFocal * cam.fx, settings.intrinsicSigmaFocal * cam.fy,
+                                              settings.intrinsicSigmaCenter, settings.intrinsicSigmaCenter,
+                                              settings.intrinsicSigmaAlpha, settings.intrinsicSigmaBeta}),
+            nullptr, intrinsics[c].data());
+      }
+    }
+    if (settings.refineExtrinsics) {
       problem.AddParameterBlock(identity.data(), 7);
       problem.SetParameterBlockConstant(identity.data());
       for (int c = 1; c < nc; ++c)
         problem.AddResidualBlock(new pba::RelativePoseCost(rig.T_c_b[c].inverse(), settings.extrinsicSigmaT,
                                                            settings.extrinsicSigmaRDeg),
                                  nullptr, identity.data(), extrinsics[c].data());
+      if (settings.extrinsicFixScale && nc > 1) {
+        double sum0 = 0;
+        for (int i = 0; i < nc; ++i)
+          for (int j = i + 1; j < nc; ++j)
+            sum0 += (rig.T_c_b[i].inverse().translation() - rig.T_c_b[j].inverse().translation()).norm();
+        std::vector<double*> blocks;
+        for (auto& e : extrinsics) blocks.push_back(e.data());
+        // 10 um: a hard constraint next to the photometric residuals.
+        problem.AddResidualBlock(new pba::RigScaleCost(nc, sum0, 1e-5), nullptr, blocks);
+      }
     }
 
     struct Block {
@@ -450,7 +500,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
       if (!b.id) continue;
       ++result.residuals, result.loopResiduals += b.loop, ++result.pointResiduals[b.point];
       double residual[kPatternSize], dRho[kPatternSize];
-      std::array<double*, 7> jacobians{};
+      std::array<double*, 9> jacobians{};
       jacobians[b.rhoIndex] = dRho;
       double cost = 0;
       problem.EvaluateResidualBlock(b.id, false, &cost, residual, jacobians.data());
@@ -469,6 +519,8 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     result.cameraPairs.push_back({std::get<0>(key), std::get<1>(key), std::get<2>(key),
                                   static_cast<size_t>(acc[0]), std::sqrt(acc[1] / acc[0]), std::sqrt(acc[2] / acc[0])});
 
+  result.cameras.clear();
+  for (int c = 0; c < nc; ++c) result.cameras.push_back(pba::withIntrinsics(rig.cameras[c], intrinsics[c].data()));
   result.T_c_b.resize(nc);
   for (int c = 0; c < nc; ++c) result.T_c_b[c] = Eigen::Map<const Sophus::SE3d>(extrinsics[c].data()).inverse();
   for (int k = 0; k < nk; ++k) result.T_w_b[k] = Eigen::Map<const Sophus::SE3d>(poses[k].data());
@@ -476,8 +528,10 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   for (int k = 0; k < nk; ++k)
     for (int c = 0; c < nc; ++c) result.affine[k][c] = {affine[k * nc + c][0], affine[k * nc + c][1]};
   for (size_t i = 0; i < points.size(); ++i) {
+    Eigen::Vector3d bearing = points[i].bearing;
+    if (settings.refineIntrinsics) result.cameras[points[i].hostCam].unproject(uvs[i], bearing);
     result.points.push_back(result.T_w_b[points[i].host] * result.T_c_b[points[i].hostCam].inverse() *
-                            (points[i].bearing / rho[i]));
+                            (bearing / rho[i]));
     result.pointDistance.push_back(1.0 / rho[i]);
     result.pointHost.push_back({points[i].host, points[i].hostCam});
     result.pointUv.push_back(uvs[i]);

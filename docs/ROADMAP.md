@@ -28,6 +28,7 @@ to initialise neural surface reconstruction / Gaussian Splatting instead of COLM
 | 21 | Full 11-camera rig (4 fisheye, 6 wide, 1 narrow) | all cameras consistent |
 | 22 | GS training and evaluation (gsplat) vs COLMAP | PSNR / SSIM / LPIPS on held-out views |
 | 23 | Metric-aligned monocular depth prior for textureless regions | GS quality vs step 22 |
+| 24 | Point quality without ground truth: free-space / multi-view consistency metric, odometry and densify point management, free-space filter, rig rotation and intrinsics refinement | floaters and depth agreement on held-out views, loop drift |
 
 Deferred to step 11:
 - Tracker speed (~72 ms/frame at step 3) and threaded image loading (~28 ms/frame).
@@ -357,3 +358,135 @@ masks in the gsplat loss (the ego vehicle is black in the images), gsplat traini
 `close_loops --pba-extrinsics`: the photometric BA optionally refines the rig extrinsics (first camera fixed, priors
 towards the rig in translation and rotation), reports the change per camera and writes the refined rig
 (`--rig-out`). Not used for the autocalib runs above: their extrinsics were consistent without it.
+
+## Step 24 log
+
+Zion garage `voxelnet 20250414T141729Z_nm` (autocalib, 3286 frames, 130 m), work in `results/cam_study`. No ground
+truth is used (the record's `sdf/` and `visual_odometry.json` are not ground truth either).
+
+**Metric** (`tools/cloud_consistency.py`, from a `close_loops --points-out` cloud): every densify host image (keyframe,
+camera) is a view whose depth is that of the points it hosts. A point is tested in every other view within 15 m:
+*support* (same distance within 5 %), *through* (the view measured a surface > 10 % and 0.1 m behind it: it saw
+through the point) or *behind* (occluded, or a mirror point under a glossy floor). Floater: through >= 2 and through
+> support. Precision: log(view depth / point depth) of supporting views, the view depth from a plane fitted to its
+own points within 3 px (pixel sampling of slanted surfaces otherwise counts as ~1 %), split by the frame gap between
+host and view (same frame, 1-30 = correlated through the same traced images, 31-299 independent, 300+ revisits),
+and per (host, view) pair into a systematic part (poses, calibration) and the scatter of single points.
+`--reference` tests clouds of the same run against the same views; `--anchor_poses` moves points of another run
+with their host frame (drift does not count); `--views even|odd` with `--exclude_npz` is the hold-out test of a
+free-space filter. Thin structures (pipes, cables under the ceiling) are partly flagged wrongly, so the floater rate
+is an upper bound and used relatively. Cross-sections confirm floaters in the open air between floor and ceiling.
+
+**Findings**, 4 CT/NL odometry cameras, densify on 6 cameras:
+- Densify points 3.8 % floaters (7 % within 2 m), odometry points 12.9 %, the photometric BA's points 13.4 %.
+  Neither observations nor the traced interval separate them (consistent wrong matches); the window BA's depth
+  sigma does (worst 20 %: 23-28 % floaters, best 60 %: 8-9 %). 38 % of the odometry points lie where densify found
+  no depth in the same image (21 % floaters there).
+- Depth agreement within 1 %: 82 % for views of the same frame or within the trace window (correlated), 56 % for
+  independent views of the same pass, 42 % for revisits; per pair 0.68 % systematic, 1.15 % scatter (~0.8 % per
+  single estimate, far above the traced intervals). Not rolling shutter or synchronisation (no dependence on
+  rotation rate or speed); it grows with the viewpoint change (fronto-parallel pattern) and is worst for the cameras
+  not in the odometry (F_MIDRANGECAM_C 39 %, B_MIDRANGECAM_C 58 %, CT 63-68 %, NL 73-76 % within 1 %).
+
+**Odometry** (`run_vo` options, 4 cameras; loops: odometry correction implied by the accepted loops):
+
+| Variant | Length | Floater | Within 1 %, gap 31-299 / 300+ | Loops | Correction median / max |
+|---|---|---|---|---|---|
+| defaults | 130.4 m | 12.9 % | 48.1 / 39.6 % | 126 | 0.05 / 0.29 m |
+| `--trace-min-quality 3` (temporal and static) | 130.3 | 10.9 | 50.0 / 43.6 | 140 | 0.03 / 0.07 |
+| `--trace-min-quality 4` | 130.3 | 10.0 | 51.2 / 43.8 | 135 | 0.03 / 0.12 |
+| `--trace-min-quality 5` | **75.8** | scale lost | | | |
+| `--activation-max-error 1` | 130.2 | 12.6 | 53.3 / 46.3 | 131 | 0.03 / 0.07 |
+| `--point-min-good-fraction 0.5` | 130.1 | 11.3 | 51.1 / 49.0 | 120 | 0.02 / 0.08 |
+| `--window-outlier 12` | 130.2 | 13.1 | 51.0 / 45.7 | 135 | 0.02 / 0.09 |
+| **quality 3 + good fraction 0.5** (pipeline) | 130.2 | **9.4** | 53.2 / 49.6 | 114 | 0.02 / 0.06 |
+| activation error 1 + good fraction 0.5 | 130.1 | 11.0 | 54.3 / 51.5 | 149 | 0.02 / 0.06 |
+| quality 3 + activation error 1 | **101.6** | scale lost | | | |
+| quality 3 temporal only (`--static-min-quality 2`) | 130.2 | 12.3 | 49.8 / 43.2 | 118 | 0.07 / 0.16 |
+| same + good fraction 0.5 | 130.1 | 11.1 | 52.5 / 49.8 | 118 | 0.02 / 0.05 |
+| quality 5 temporal only | 130.3 | 12.1 | 50.7 / 42.5 | 123 | 0.02 / 0.14 |
+| quality 3 temporal only + activation error 1 + good fraction 0.5 | 130.1 | 10.5 | 54.7 / 51.5 | 143 | 0.02 / 0.06 |
+| `--activation-min-good 2` | 123.4 | 32.8 | | 26 | 0.03 / 0.38 |
+
+Ambiguous matches are the main source of drift (max loop correction 0.29 -> 0.07 m), the static ones between the
+cameras of a keyframe included: quality 3 on the temporal traces alone helps much less. They also carry the metric
+scale, so too strict a setting loses it (quality 5, or 3 with activation error 1 px: 22-42 % short). Run lengths are
+the check for that. `--static-min-quality` (default 2) sets the static traces apart from `--trace-min-quality`; the
+pipeline uses 3 for both. The first keyframe activates with one trace (only its static
+traces exist), so `--activation-min-good` > 1 does not stop the start.
+
+**Densify** (`close_loops`): `--densify-min-quality 3` (ambiguity threshold of the densify traces),
+`--densify-verify` (when a host closes, its points' inverse depth is refined by Gauss-Newton over all buffered views,
+host frame and the 30 following, all cameras; a point needs 3 views with parallax, 1 px per 10 % inverse depth, whose
+pattern rmse is below 10, and half of its views with parallax so; ~1.3 GB image buffer for 6 cameras),
+`--free-space` (`sdv::freeSpaceFloaters`, the metric's test with all host images, ~6-8 s for 3-5 M points).
+Hold-out floater rate (flagged with even keyframes, scored with odd ones):
+
+| Densify | Points | Floater (held-out) |
+|---|---|---|
+| plain | 5.10 M | 3.46 % |
+| min quality 3 | 4.90 M | 2.26 % |
+| min quality 3 + free space | ~4.8 M | 1.18 % |
+| verify | 3.12 M | 2.25 % |
+| verify + free space | 3.02 M | ~0.8 % (the filter saw the scoring views) |
+| verify + min quality 3 + free space | 3.05 M | ~0.7 % (same) |
+
+Verify also tightens the depth (within 1 %: 56 -> 60 % independent, 42 -> 47 % revisits) but costs ~40 % of the
+points; quality 3 costs 4 %.
+
+**Cameras** (odometry sets, densify on the same 6 cameras; run_vo orders cameras by the rig file, so with
+F_MIDRANGECAM_C in the set it is camera 0, the body reference):
+
+| Odometry cameras | Loops | Correction median / max | Floaters per host camera |
+|---|---|---|---|
+| 4 (CT, NL) | 126 | 0.05 / 0.29 m | F_MID 7.3, B_MID 5.0, CT 3.0-3.9, NL 2.4-2.5 % |
+| 4 + B_MID | 93 | 0.03 / 0.18 m | fewer loops: revisits misaligned (all cameras ~12 %) |
+| 4 + F_MID | 92 | 0.06 / **1.05 m** | F_MID 27.6 % |
+| 6 | 131 | 0.07 / 0.25 m | F_MID **16.9**, B_MID 5.5, CT 2.2-2.4, NL 2.1 % |
+| 6, refined rig rotations | **150** | 0.06 / **0.13 m** | F_MID **7.7**, B_MID 5.8, CT 2.7-3.0, NL 2.2 % |
+
+The 6-camera poses are more consistent than the 4-camera ones (per-pair offset 0.59 vs 0.68 %, revisits 46.5 vs
+42.3 % within 1 %). F_MIDRANGECAM_C (behind the windshield) is pitched by -0.157 deg against the other five:
+`close_loops --pba-extrinsics --pba-extrinsic-sigma-t 0.001` (translations held, the metric scale stays) moves all
+other cameras by +0.157 +- 0.005 deg pitch (roll, yaw < 0.02 deg, translations ~5 mm). close_loops takes the extrinsics
+from the keyframe records, so a refined rig (`--rig-out`) needs a new run_vo. Residuals into F_MIDRANGECAM_C stay at
+~9 after the BA (all others 6-7.5) while those of its own points into the others are 6.6-7.1.
+`close_loops --pba-intrinsics [CAMERAS]` (new, joint BA only, `pba::CalibratedCost`: host bearings from the host
+intrinsics, analytic pose/depth/affine Jacobians, central differences for fx fy cx cy alpha beta; priors 1 % focal,
+2 px principal point, 0.02 alpha, 0.05 beta; ~2x the BA time): F_MIDRANGECAM_C cy +2.14 px (the pitch again), fx
++0.28 %, fy -0.26 %; all other cameras < 0.3 % focal, < 0.6 px principal point. Residuals into F_MIDRANGECAM_C 9.25
+(rotations only: 9.4): its remaining error is not an EUCM intrinsics error but image appearance (its edges are
+sharper than the other cameras', 1.72 vs ~1.45 fine/coarse gradient ratio: a different ISP or the windshield).
+Fixing all distances between the cameras instead of the translations is the same constraint (four or more cameras
+not in a plane are rigid under fixed distances).
+
+End to end (`results/zion_6cam`: `REFINE_RIG=1`, odometry and densify on all 6 cameras, the new defaults,
+`STOP_AFTER=loops`): rig stage pitch +0.22 deg for the five cameras against F_MIDRANGECAM_C (the full-record estimate
+with the old odometry settings: +0.16 deg; the 1 mm translation prior is soft against the photometric residuals: the
+cameras moved 11-19 mm backwards relative to F_MIDRANGECAM_C, baselines -0.12 % on average), 265 keyframes, 129.8 m,
+123 loops, loop correction median 0.01 m, max 0.07 m, 5.18 M points after the free-space filter (100 k removed).
+Odd-view scores, against the same filter on the 4-camera odometry (`c4fq3`, 4.79 M points): floaters 0.52 vs 0.66 %
+(F_MID 0.63 vs 1.22, B_MID 0.86 vs 1.15 %), within 1 % 62.6 / 49.0 vs 59.8 / 45.5 % (independent / revisits), per pair
+0.62 / 0.99 vs 0.68 / 1.09 %. The old pipeline (4 cameras, defaults): 3.5 % floaters (held out), 56 / 42 %, max loop
+correction 0.29 m. Not yet trained with GS.
+
+Rig scale constraint (`close_loops --pba-extrinsic-fix-scale`, `pba::RigScaleCost`): the sum of the distances
+between all camera centres stays at its input value (10 um), the translations are otherwise free (5 cm prior).
+The 1 mm prior above was no constraint against 2.4 M photometric residuals (same rotations and centre moves as
+without it). Fixing all pairwise distances instead would freeze the relative translations (cameras not in a plane).
+Zion, 6 cameras (`results/zion_6cam_scale`): the four CT/NL cameras keep their baselines within 1 mm,
+F_MIDRANGECAM_C moves 6-10 mm (behind the windshield), B_MIDRANGECAM_C 2-5 mm; loop correction median 0.01, max
+0.03 m, 126 loops, 5.10 M points. The pipeline's rig stage uses it.
+
+Chili 2026-09-22 (8512 frames, 625 m, multi-storey; autocalib), 6 cameras, `REFINE_RIG=1 RIG_FRAMES=2500
+RIG_POINTS=60` (at 120 points per image the rig BA had 4.6 M residuals, ~16 GB), `results/chili_6cam`: rig rotations
+<= 0.08 deg, centres 2-7 mm, F_MIDRANGECAM_C fine on this vehicle (residuals into it 6.3-6.5, as all pairs; BA rmse
+6.12). Odometry 1209 keyframes, 625.4 m (4 cameras with the old settings: 1357, 622.9 m); loops (detect_loops only):
+correction median 0.03 m, max 0.15 m (old: 0.45 / 1.55 m), 2093 loops. Loop closure, BA and densify not run yet.
+
+Pipeline (`tools/gs_pipeline.sh`): `VO_ARGS` (`--trace-min-quality 3 --static-min-quality 3
+--point-min-good-fraction 0.5`), `DENSIFY_ARGS` (`--densify-min-quality 3
+--free-space`), `REFINE_RIG=1` (stage rig: rotations from the first `RIG_FRAMES` frames, then every stage with
+`rig/rig_refined.yaml`). Two tests fail on Linux/clang at HEAD as well (MonoInitializerTest.ForwardMotionWithYaw,
+WindowOptimizerTest.MarginalizationKeepsOptimumAndInformation, Pinhole variants): open.
+

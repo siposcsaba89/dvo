@@ -45,6 +45,7 @@ void SemiDenseMapper::addFrame(int frameIndex, const std::vector<cv::Mat>& image
     pyr[c] = std::make_shared<const ImagePyramid>(toFloatGray(images[c]), 1);
     T_c_w[c] = m_rig.T_c_b[c] * T_w_b.inverse();
   }
+  if (m_settings.verify) m_frames.push_back({frameIndex, pyr, T_c_w, affine});
 
   for (Host& h : m_hosts)
     for (int c = 0; c < nc; ++c) traceInto(h, c, pyr[c]->level(0), T_c_w[c], affine[c], c != h.camera);
@@ -53,6 +54,8 @@ void SemiDenseMapper::addFrame(int frameIndex, const std::vector<cv::Mat>& image
     m_hosts.pop_front();
   }
   if (host) createHosts(frameIndex, images, pyr, T_c_w, affine);
+  const int oldest = m_hosts.empty() ? frameIndex : m_hosts.front().frameIndex;
+  while (!m_frames.empty() && m_frames.front().frameIndex < oldest) m_frames.pop_front();
 }
 
 void SemiDenseMapper::createHosts(int frameIndex, const std::vector<cv::Mat>& images,
@@ -108,21 +111,97 @@ void SemiDenseMapper::traceInto(Host& h, int camera, const ImageLevel& img, cons
   for (size_t k = 0; k < kParallelChunks; ++k) m_stats.traces += traces[k], m_stats.good += good[k];
 }
 
+bool SemiDenseMapper::verify(const Host& h, const ImmaturePoint& p, double& rho) const {
+  struct View {
+    HostTargetState state;
+    const Camera* cam;
+    const ImageLevel* img;
+  };
+  std::vector<View> views;
+  for (const BufferedFrame& f : m_frames)
+    for (int c = 0; c < m_rig.size(); ++c) {
+      if (f.frameIndex == h.frameIndex && c == h.camera) continue;
+      HostTargetState s;
+      s.T_t_h = f.T_c_w[c] * h.T_c_w.inverse();
+      s.host = h.affine;
+      s.target = f.affine[c];
+      views.push_back({s, &m_rig.cameras[c], &f.pyr[c]->level(0)});
+    }
+  const PhotometricSettings& ps = m_settings.trace.photometric;
+  const double maxEnergy = kPatternSize * 0.5 * m_settings.verifyMaxError * m_settings.verifyMaxError;
+  PatternResidual res;
+  auto rmse = [&](const PatternResidual& r) {
+    double e = 0;
+    for (const auto& px : r.pixels) e += px.r * px.r;
+    return std::sqrt(e / kPatternSize);
+  };
+
+  // Gauss-Newton on the inverse depth over the views that match at the current estimate (the others are occluded
+  // or wrong); the step is kept only if the energy of that set falls.
+  const double rhoMin = 0.5 * p.rhoMin(), rhoMax = 2.0 * p.rhoMax();
+  for (int it = 0; it < m_settings.verifyIterations; ++it) {
+    std::vector<const View*> inliers;
+    double H = 0, b = 0, energy = 0;
+    for (const View& v : views) {
+      if (!evaluatePatternResidual(p.pattern(), rho, v.state, *v.cam, *v.img, ps, res) || res.energy > 2 * maxEnergy)
+        continue;
+      inliers.push_back(&v);
+      energy += res.energy;
+      for (const auto& px : res.pixels) H += px.weight * px.dRho * px.dRho, b += px.weight * px.dRho * px.r;
+    }
+    if (inliers.empty() || H <= 1e-12) break;
+    const double candidate = std::clamp(rho - b / H, rhoMin, rhoMax);
+    double newEnergy = 0;
+    bool ok = true;
+    for (const View* v : inliers) {
+      if (!evaluatePatternResidual(p.pattern(), candidate, v->state, *v->cam, *v->img, ps, res)) {
+        ok = false;
+        break;
+      }
+      newEnergy += res.energy;
+    }
+    if (!ok || newEnergy >= energy) break;
+    rho = candidate;
+  }
+
+  int good = 0, informative = 0;
+  for (const View& v : views) {
+    if (!evaluatePatternResidual(p.pattern(), rho, v.state, *v.cam, *v.img, ps, res)) continue;
+    Eigen::Vector2d uv, dRho;
+    if (!projectBearing(p.bearing(), rho, v.state.T_t_h, *v.cam, uv, nullptr, &dRho)) continue;
+    if (0.1 * rho * dRho.norm() < m_settings.verifyMinParallax) continue;
+    ++informative;
+    good += rmse(res) < m_settings.verifyMaxError;
+  }
+  return good >= m_settings.verifyMinViews && good >= m_settings.verifyMinFraction * informative;
+}
+
 void SemiDenseMapper::close(Host& h) {
   const Sophus::SE3d T_w_c = h.T_c_w.inverse();
+  std::vector<double> rhos(h.points.size());
+  std::vector<char> status(h.points.size(), 0);  // 0 accepted, 1 matches, 2 interval, 3 verification
+  parallelChunks(h.points.size(), [&](size_t, size_t begin, size_t end) {
+    for (size_t i = begin; i < end; ++i) {
+      const ImmaturePoint& p = h.points[i];
+      double rho = p.rho();
+      if (p.numGood() < m_settings.minGood || p.numOutliers() > m_settings.maxOutlierRatio * p.numGood() ||
+          rho <= 1e-6 || rho < p.rhoMin() || rho > p.rhoMax())
+        status[i] = 1;
+      else if (0.5 * (p.rhoMax() - p.rhoMin()) / rho > m_settings.maxInterval)
+        status[i] = 2;
+      else if (m_settings.verify && !verify(h, p, rho))
+        status[i] = 3;
+      rhos[i] = rho;
+    }
+  });
   for (size_t i = 0; i < h.points.size(); ++i) {
     const ImmaturePoint& p = h.points[i];
-    const double rho = p.rho();
-    if (p.numGood() < m_settings.minGood || p.numOutliers() > m_settings.maxOutlierRatio * p.numGood() ||
-        rho <= 1e-6 || rho < p.rhoMin() || rho > p.rhoMax()) {
-      ++m_stats.rejectMatches;
-      continue;
-    }
-    const double interval = 0.5 * (p.rhoMax() - p.rhoMin()) / rho;
-    if (interval > m_settings.maxInterval) {
-      ++m_stats.rejectInterval;
-      continue;
-    }
+    if (status[i] == 1) ++m_stats.rejectMatches;
+    if (status[i] == 2) ++m_stats.rejectInterval;
+    if (status[i] == 3) ++m_stats.rejectVerify;
+    if (status[i] != 0) continue;
+    const double rho = rhos[i];
+    const double interval = 0.5 * (p.rhoMax() - p.rhoMin()) / p.rho();
     MapPoint m{T_w_c * (p.bearing() / rho), h.intensity[i], h.frameIndex, h.camera, p.pattern().uv, 1.0 / rho,
                p.numGood(), interval, MapPointSource::SemiDense};
     if (h.hasColor) m.color = h.color[i];

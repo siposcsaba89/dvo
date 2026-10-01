@@ -62,6 +62,46 @@ TEST(SemiDenseMapper, RecoversSurfacesFromKnownPoses) {
   EXPECT_LT(errors[errors.size() * 95 / 100], 0.03);
 }
 
+TEST(SemiDenseMapper, VerificationKeepsCorrectPointsAndRefinesDepth) {
+  const sdv::Rig rig = surroundRig();
+  auto run = [&](bool verify, sdv::SemiDenseMapper::Stats& stats) {
+    sdv::SemiDenseSettings settings;
+    settings.pointsPerImage = 3000;
+    settings.traceFrames = 15;
+    settings.verify = verify;
+    sdv::SemiDenseMapper mapper(rig, settings);
+    const std::vector<sdv::AffineBrightness> affine(rig.size());
+    for (int k = 0; k < 20; ++k) {
+      std::vector<cv::Mat> images;
+      for (int c = 0; c < rig.size(); ++c) {
+        cv::Mat img = synthetic::room::render(rig.cameras[c], rig.T_c_b[c] * bodyPose(k).inverse());
+        cv::GaussianBlur(img, img, cv::Size(0, 0), 1.0);
+        images.push_back(img);
+      }
+      mapper.addFrame(k, images, bodyPose(k), affine, k % 5 == 0);
+    }
+    const auto points = mapper.finish();
+    stats = mapper.stats();
+    std::vector<double> errors;
+    for (const auto& p : points) {
+      const Eigen::Vector3d center = (bodyPose(p.frameIndex) * rig.T_c_b[p.camera].inverse()).translation();
+      const Eigen::Vector3d ray = p.position - center;
+      errors.push_back(std::abs(ray.norm() / synthetic::room::castRay(center, ray.normalized()) - 1.0));
+    }
+    std::sort(errors.begin(), errors.end());
+    return errors;
+  };
+  sdv::SemiDenseMapper::Stats plain, verified;
+  const auto e0 = run(false, plain);
+  const auto e1 = run(true, verified);
+  ASSERT_FALSE(e0.empty());
+  ASSERT_FALSE(e1.empty());
+  EXPECT_EQ(plain.rejectVerify, 0);
+  EXPECT_GT(e1.size(), e0.size() * 8 / 10);
+  EXPECT_LE(e1[e1.size() / 2], e0[e0.size() / 2]);
+  EXPECT_LE(e1[e1.size() * 95 / 100], e0[e0.size() * 95 / 100]);
+}
+
 TEST(SemiDenseMapper, VoxelMergeKeepsOnePointPerVoxel) {
   const sdv::Rig rig = surroundRig();
   sdv::SemiDenseSettings settings;

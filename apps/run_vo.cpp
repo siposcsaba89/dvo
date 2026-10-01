@@ -39,7 +39,7 @@
 namespace po = boost::program_options;
 
 int main(int argc, char** argv) {
-  std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, trajectoryPlyFile, jsonFile, pngFile,
+  std::string sequenceDir, videoFile, imageDir, rigFile, cameraFile, gtFile, outFile, plyFile, trajectoryPlyFile, pointsFile, jsonFile, pngFile,
       colmapDir, keyframesFile, loopVocabulary, loopsFile;
   std::vector<std::string> rigCameras;
   bool colmapKeyframesOnly = false, colmapAlign = false;
@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
       ("gt", po::value(&gtFile), "ground-truth poses for evaluation (KITTI format, one per input frame)")
       ("out,o", po::value(&outFile), "write estimated poses (KITTI format, frames with a pose)")
       ("ply", po::value(&plyFile), "write trajectory, GT and map points (Sim3-aligned to GT if given)")
+      ("points-out", po::value(&pointsFile),
+       "write the odometry map points with their attributes (host, distance, observations, sigma), before any filter")
       ("trajectory-ply", po::value(&trajectoryPlyFile),
        "write only the trajectory (and GT): fast, without the map points and their colour pass over the input")
       ("colmap", po::value(&colmapDir), "write a COLMAP text model (sparse/0) and images to this directory")
@@ -101,6 +103,18 @@ int main(int argc, char** argv) {
        "keyframe translation flow scale (px)")
       ("stereo-weight", po::value(&settings.window.stereoWeight)->default_value(settings.window.stereoWeight),
        "weight of static residuals between cameras of one keyframe")
+      ("activation-min-good", po::value(&settings.activationMinGood)->default_value(settings.activationMinGood),
+       "good traces a candidate needs to become active")
+      ("activation-max-error", po::value(&settings.activationMaxErrorPixels)->default_value(settings.activationMaxErrorPixels),
+       "largest matching error (px) of the last trace for activation")
+      ("trace-min-quality", po::value(&settings.trace.minQuality)->default_value(settings.trace.minQuality),
+       "second best / best energy along the epipolar line for a good trace")
+      ("static-min-quality", po::value(&settings.staticMinQuality)->default_value(settings.staticMinQuality),
+       "as --trace-min-quality for the traces between cameras of one keyframe (metric scale)")
+      ("window-outlier", po::value(&settings.window.outlierThreshold)->default_value(settings.window.outlierThreshold),
+       "window BA: a residual is an outlier above the energy of |r| = this per pixel")
+      ("point-min-good-fraction", po::value(&settings.pointMinGoodFraction)->default_value(settings.pointMinGoodFraction),
+       "drop window points whose good residuals are fewer than this fraction of their residuals in the image")
       ("ba-iterations", po::value(&settings.windowIterations)->default_value(settings.windowIterations),
        "window BA iterations per keyframe")
       ("cam-alpha", po::value<double>()->notifier([&](double a) { camAlpha = a; }),
@@ -412,6 +426,10 @@ int main(int argc, char** argv) {
     std::vector<sdv::MapPoint> mapPoints = vo.mapPoints();
     if (!correction.empty())
       for (auto& p : mapPoints) p.position = correction.at(p.frameIndex) * p.position;
+    if (!pointsFile.empty()) {
+      sdv::writeMapPointsPly(pointsFile, mapPoints);
+      spdlog::info("wrote {} ({} map points with attributes)", pointsFile, mapPoints.size());
+    }
     if (densify) {
       const double s = denseScale > 0 ? denseScale : scale;
       sdv::Rig denseRig;

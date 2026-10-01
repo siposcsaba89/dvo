@@ -35,6 +35,9 @@ struct OdometrySettings {
   int windowIterations = 6;
   double activationMaxErrorPixels = 2.0;
   int activationMinGood = 1;
+  // A point is dropped when fewer than this fraction of its residuals inside the image are good (0 = only points
+  // without any good residual).
+  double pointMinGoodFraction = 0.0;
   double initialActivationCell = 12.0;
   // New keyframe when flow / kfFlow + translation flow / kfTranslationFlow + |delta a| / kfBrightness > 1.
   double kfFlow = 120.0;
@@ -43,6 +46,10 @@ struct OdometrySettings {
   double kfRmseFactor = 2.0;
   double marginalizeVisibleFraction = 0.05;  // DSO §3.1
   double stereoMinDepth = 1.5;  // bounds the initial search range between cameras of one keyframe
+  // Second best / best energy for a good trace between cameras of one keyframe. These carry the metric scale; a
+  // stricter value for them (as for the temporal traces, trace.minQuality) loses it (garage: 22 % short at 3 with an
+  // activation error of 1 px, 42 % at 5).
+  double staticMinQuality = 2.0;
   int stereoMaxSamples = 400;
   bool checkCalibration = false;  // multi-camera: log the temporal vs static depth bias at every keyframe
   // Converged candidates that were never activated also become map points when their keyframe leaves the window.

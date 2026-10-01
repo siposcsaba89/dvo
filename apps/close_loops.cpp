@@ -125,11 +125,13 @@ int main(int argc, char** argv) {
   std::string keyframesFile, vocabularyFile, posesFile, outFile, gtFile, plyFile;
   std::vector<double> up{0, 0, 1};
   int start = 0, stride = 1;
-  bool bundleAdjust = false, photometric = false, densify = false, merge = false;
+  bool bundleAdjust = false, photometric = false, densify = false, merge = false, freeSpace = false;
+  bool refineIntrinsics = false;
+  sdv::FreeSpaceSettings freeSpaceSettings;
   sdv::SemiDenseSettings dense{.voxelSize = 0.05, .minVoxelHosts = 2};
   sdv::PointMergeSettings mergeSettings{.minFrameGap = 100};
   std::string rigFile, sequenceDir, rigOutFile, pointsFile, brightnessFile;
-  std::vector<std::string> rigCameras, densifyCameras;
+  std::vector<std::string> rigCameras, densifyCameras, intrinsicNames;
   double scale = 1.0, maxDistanceFactor = 5.0, maxDepthSigma = 0.0, neighbourRadius = 0.2;
   int minResiduals = 3, minNeighbours = 3;
   sdv::LoopSettings loopSettings;
@@ -201,6 +203,15 @@ int main(int argc, char** argv) {
       ("points-out", po::value(&pointsFile),
        "PLY: also write the points before the neighbour filter with their attributes (host camera, frame, pixel, "
        "distance, observations, sigma, kept) as vertex properties")
+      ("pba-extrinsic-fix-scale", po::bool_switch(&pbaSettings.extrinsicFixScale),
+       "photometric BA with --pba-extrinsics: hold the sum of the distances between the cameras (the metric scale), "
+       "the translations otherwise free up to --pba-extrinsic-sigma-t")
+      ("pba-intrinsics", po::value(&intrinsicNames)->multitoken()->zero_tokens(),
+       "photometric BA: also refine the intrinsics of these cameras (no names: all); see --rig-out")
+      ("pba-intrinsic-sigma-f", po::value(&pbaSettings.intrinsicSigmaFocal)->default_value(pbaSettings.intrinsicSigmaFocal),
+       "prior of the refined intrinsics, focal length (relative)")
+      ("pba-intrinsic-sigma-c", po::value(&pbaSettings.intrinsicSigmaCenter)->default_value(pbaSettings.intrinsicSigmaCenter),
+       "prior of the refined intrinsics, principal point (px at the run scale)")
       ("rig-out", po::value(&rigOutFile), "write the rig (--rig) with the extrinsics of this run, for a new run_vo")
       ("pba-odometry-factor", po::value(&pbaSettings.odometrySigmaFactor)->default_value(pbaSettings.odometrySigmaFactor),
        "odometry edge sigma factor (0 = off)")
@@ -230,10 +241,26 @@ int main(int argc, char** argv) {
        "multi-view check voxel, m (0 = off)")
       ("densify-voxel-hosts", po::value(&dense.minVoxelHosts)->default_value(dense.minVoxelHosts),
        "host images a voxel needs")
+      ("densify-min-quality", po::value(&dense.trace.minQuality)->default_value(dense.trace.minQuality),
+       "densify: second best / best energy along the epipolar line for a good trace")
+      ("densify-verify", po::bool_switch(&dense.verify),
+       "densify: refine each point's inverse depth over all buffered views and require photometric agreement")
+      ("densify-verify-error", po::value(&dense.verifyMaxError)->default_value(dense.verifyMaxError),
+       "densify verification: pattern rmse per pixel of an agreeing view")
+      ("densify-verify-views", po::value(&dense.verifyMinViews)->default_value(dense.verifyMinViews),
+       "densify verification: agreeing views with parallax a point needs")
+      ("densify-verify-fraction", po::value(&dense.verifyMinFraction)->default_value(dense.verifyMinFraction),
+       "densify verification: fraction of the views with parallax that must agree")
       ("densify-cameras", po::value(&densifyCameras)->multitoken(),
        "rig cameras to densify with (default: those of the run); cameras the run did not use keep the rig "
        "extrinsics and get no brightness estimate")
       ("merge", po::bool_switch(&merge), "PLY: merge duplicate points of separate passes (laps)")
+      ("free-space", po::bool_switch(&freeSpace),
+       "PLY: drop floaters, points that other densify host images saw through (needs --densify)")
+      ("free-space-radius", po::value(&freeSpaceSettings.radius)->default_value(freeSpaceSettings.radius),
+       "free-space test: a host image tests the points within this distance, m")
+      ("free-space-min", po::value(&freeSpaceSettings.minThrough)->default_value(freeSpaceSettings.minThrough),
+       "free-space test: views that must see through a point (and outnumber those that confirm it)")
       ("merge-distance", po::value(&mergeSettings.maxDistance)->default_value(mergeSettings.maxDistance),
        "merge radius, m")
       ("merge-frame-gap", po::value(&mergeSettings.minFrameGap)->default_value(mergeSettings.minFrameGap),
@@ -250,6 +277,7 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     po::notify(vm);
+    refineIntrinsics = vm.count("pba-intrinsics") > 0;
     if (up.size() != 3) throw po::error("--up takes 3 values");
     using Solver = sdv::PhotometricBASettings::Solver;
     if (pbaSolver == "sparse") pbaSettings.solver = Solver::SparseAmd;
@@ -274,6 +302,14 @@ int main(int argc, char** argv) {
     auto cameraName = [&](int c) {
       return c < static_cast<int>(cameraNames.size()) ? cameraNames[c] : "cam" + std::to_string(c);
     };
+    if (refineIntrinsics) {
+      pbaSettings.refineIntrinsics = true;
+      for (const auto& n : intrinsicNames) {
+        const auto it = std::find(cameraNames.begin(), cameraNames.end(), n);
+        if (it == cameraNames.end()) throw std::invalid_argument("--pba-intrinsics: unknown camera " + n);
+        pbaSettings.intrinsicCameras.push_back(static_cast<int>(it - cameraNames.begin()));
+      }
+    }
     auto poses = sdv::loadKittiPoses(posesFile);
     sdv::LoopDetector detector(rig, std::make_shared<const sdv::Vocabulary>(vocabularyFile), loopSettings);
     std::vector<sdv::LoopConstraint> found;
@@ -351,14 +387,43 @@ int main(int argc, char** argv) {
                        cameraName(c), r.x(), r.y(), r.z(), r.norm(),
                        (pba.T_c_b[c].inverse().translation() - rig.T_c_b[c].inverse().translation()).norm());
         }
+        for (int i = 0; i < rig.size(); ++i)
+          for (int j = i + 1; j < rig.size(); ++j) {
+            const double d0 = (rig.T_c_b[i].inverse().translation() - rig.T_c_b[j].inverse().translation()).norm();
+            const double d1 = (pba.T_c_b[i].inverse().translation() - pba.T_c_b[j].inverse().translation()).norm();
+            spdlog::info("baseline {} - {}: {:.4f} -> {:.4f} m ({:+.1f} mm)", cameraName(i), cameraName(j), d0, d1,
+                         1000 * (d1 - d0));
+          }
         rig.T_c_b = pba.T_c_b;  // for the densify pass
+      }
+      if (pbaSettings.refineIntrinsics) {
+        for (int c = 0; c < rig.size(); ++c) {
+          const sdv::Camera &a = rig.cameras[c], &b = pba.cameras[c];
+          spdlog::info("intrinsics {}: fx {:+.3f} %, fy {:+.3f} %, cx {:+.2f} px, cy {:+.2f} px, alpha {:+.4f}, beta {:+.4f}",
+                       cameraName(c), 100 * (b.fx / a.fx - 1), 100 * (b.fy / a.fy - 1), b.cx - a.cx, b.cy - a.cy,
+                       b.alpha - a.alpha, b.beta - a.beta);
+        }
+        rig.cameras = pba.cameras;
       }
     }
     if (!rigOutFile.empty()) {
       if (rigFile.empty()) throw std::invalid_argument("--rig-out needs --rig");
       std::vector<std::pair<std::string, Sophus::SE3d>> extrinsics;
       for (int c = 0; c < rig.size(); ++c) extrinsics.emplace_back(cameraName(c), rig.T_c_b[c].inverse());
-      sdv::writeRigConfig(rigFile, extrinsics, rigOutFile);
+      std::vector<std::pair<std::string, std::array<double, 6>>> intrinsicsOut;
+      if (pbaSettings.refineIntrinsics) {
+        const sdv::RigConfig config = sdv::loadRigConfig(rigFile);
+        for (int c = 0; c < rig.size(); ++c)
+          for (const auto& rc : config.cameras) {
+            if (rc.name != cameraName(c)) continue;
+            // Back to the camera YAML: undo the run scale and image_width (pixel centres are integers).
+            const double s = scale * rc.imageScale;
+            const sdv::Camera& k = rig.cameras[c];
+            intrinsicsOut.push_back({rc.name, {k.fx / s, k.fy / s, (k.cx + 0.5) / s - 0.5, (k.cy + 0.5) / s - 0.5,
+                                               k.alpha, k.beta}});
+          }
+      }
+      sdv::writeRigConfig(rigFile, extrinsics, rigOutFile, intrinsicsOut);
       spdlog::info("wrote {}", rigOutFile);
     }
     const auto uncorrected = poses;
@@ -431,12 +496,12 @@ int main(int argc, char** argv) {
       } else {
         for (const auto& p : ba.points) scene.addPoint(p, {200, 200, 200});
       }
+      sdv::Rig denseRig = rig;
       if (densify) {
         const auto t0 = std::chrono::steady_clock::now();
         // All input frames with the corrected poses, keyframes as hosts: between keyframes the small baselines narrow
         // the epipolar search step by step (keyframes alone leave most traces ambiguous). Brightness between
         // keyframes is interpolated.
-        sdv::Rig denseRig = rig;
         std::vector<int> runCamera(static_cast<size_t>(rig.size()));  // record camera of each densify camera, or -1
         std::iota(runCamera.begin(), runCamera.end(), 0);
         std::vector<std::string> denseNames = rigCameras;
@@ -576,9 +641,9 @@ int main(int argc, char** argv) {
         for (const auto& p : densePoints)
           if (p.distance <= limit) cloud.push_back(p), ++added;
         spdlog::info("densify: {} candidates, {:.1f} good traces each, {} accepted (rejected: {} too few matches, {} "
-                     "imprecise), {} after voxel check, {} within {:.1f} m, {:.1f} s",
+                     "imprecise, {} by verification), {} after voxel check, {} within {:.1f} m, {:.1f} s",
                      st.candidates, static_cast<double>(st.good) / std::max<long long>(st.candidates, 1), st.accepted,
-                     st.rejectMatches, st.rejectInterval, densePoints.size(), added, limit,
+                     st.rejectMatches, st.rejectInterval, st.rejectVerify, densePoints.size(), added, limit,
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
       }
       if (merge) {
@@ -587,6 +652,18 @@ int main(int argc, char** argv) {
         cloud = sdv::mergeDuplicatePoints(cloud, mergeSettings, &merged);
         spdlog::info("merge: {} -> {} points ({} pairs within {:.3f} m, hosts {}+ frames apart)", unmerged, cloud.size(),
                      merged, mergeSettings.maxDistance, mergeSettings.minFrameGap);
+      }
+      if (freeSpace && densify) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto fs = sdv::freeSpaceFloaters(denseRig, poses, cloud, freeSpaceSettings);
+        const size_t before = cloud.size();
+        size_t w = 0;
+        for (size_t i = 0; i < cloud.size(); ++i)
+          if (!fs.floater[i]) cloud[w++] = cloud[i];
+        cloud.resize(w);
+        spdlog::info("free space: {} of {} points seen through by {}+ of {} host images, removed ({:.1f} s)",
+                     before - cloud.size(), before, freeSpaceSettings.minThrough, fs.views,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
       }
       std::vector<Eigen::Vector3d> positions;
       for (const auto& p : cloud) positions.push_back(p.position);

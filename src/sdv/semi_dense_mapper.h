@@ -27,6 +27,15 @@ struct SemiDenseSettings {
   double voxelSize = 0.0;
   int minVoxelHosts = 1;  // a point is kept when its voxel holds points of this many different host images
   bool thin = false;  // keep only the most precise point per voxel
+  // Multi-view verification when a host closes: the inverse depth is refined over all buffered views (host frame
+  // and the traceFrames following ones, all cameras), then a point needs verifyMinViews views with parallax whose
+  // pattern rmse is below verifyMaxError, and at least verifyMinFraction of its views with parallax so.
+  bool verify = false;
+  int verifyIterations = 3;
+  double verifyMaxError = 10.0;  // intensity rmse per pattern pixel
+  int verifyMinViews = 3;
+  double verifyMinFraction = 0.5;
+  double verifyMinParallax = 1.0;  // pixels a view moves for a 10 % inverse-depth change, to count
   TraceSettings trace;
 };
 
@@ -46,7 +55,7 @@ class SemiDenseMapper {
 
   struct Stats {
     long long traces = 0, good = 0, candidates = 0, accepted = 0, merged = 0;
-    long long rejectMatches = 0, rejectInterval = 0;
+    long long rejectMatches = 0, rejectInterval = 0, rejectVerify = 0;
   };
   const Stats& stats() const { return m_stats; }
 
@@ -67,12 +76,22 @@ class SemiDenseMapper {
                    const std::vector<AffineBrightness>& affine);
   void traceInto(Host& h, int camera, const ImageLevel& img, const Sophus::SE3d& T_c_w, const AffineBrightness& affine,
                  bool requireVisible);
+  struct BufferedFrame {
+    int frameIndex;
+    std::vector<std::shared_ptr<const ImagePyramid>> pyr;
+    std::vector<Sophus::SE3d> T_c_w;
+    std::vector<AffineBrightness> affine;
+  };
+
   void close(Host& h);
+  // Refines rho over the buffered views; false if the point fails the verification.
+  bool verify(const Host& h, const ImmaturePoint& p, double& rho) const;
 
   Rig m_rig;
   SemiDenseSettings m_settings;
   PointSelector m_selector;
   std::deque<Host> m_hosts;
+  std::deque<BufferedFrame> m_frames;
   std::vector<MapPoint> m_points;
   Stats m_stats;
 };

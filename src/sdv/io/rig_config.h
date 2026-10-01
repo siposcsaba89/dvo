@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -49,8 +50,11 @@ RigConfig loadRigConfig(const std::filesystem::path& file);
 
 // Copy of the rig file `source` with T_body_camera replaced for the named cameras (e.g. refined extrinsics); relative
 // paths are made absolute so that `out` can live anywhere.
+// Intrinsics (fx, fy, cx, cy, alpha, beta) for the named cameras, at the resolution of their camera YAML, replace
+// those of the YAML (written inline).
 void writeRigConfig(const std::filesystem::path& source,
-                    const std::vector<std::pair<std::string, Sophus::SE3d>>& T_b_c, const std::filesystem::path& out);
+                    const std::vector<std::pair<std::string, Sophus::SE3d>>& T_b_c, const std::filesystem::path& out,
+                    const std::vector<std::pair<std::string, std::array<double, 6>>>& intrinsics = {});
 
 struct RigStream {
   const RigCameraConfig* config;

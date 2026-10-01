@@ -105,7 +105,8 @@ RigConfig loadRigConfig(const std::filesystem::path& file) {
 }
 
 void writeRigConfig(const std::filesystem::path& source,
-                    const std::vector<std::pair<std::string, Sophus::SE3d>>& T_b_c, const std::filesystem::path& out) {
+                    const std::vector<std::pair<std::string, Sophus::SE3d>>& T_b_c, const std::filesystem::path& out,
+                    const std::vector<std::pair<std::string, std::array<double, 6>>>& intrinsics) {
   YAML::Node root = YAML::LoadFile(source.string());
   const std::filesystem::path base = std::filesystem::absolute(source).parent_path();
   auto absolute = [&](YAML::Node node) {
@@ -117,6 +118,18 @@ void writeRigConfig(const std::filesystem::path& source,
     else absolute(cam["camera"]["mask"]);
     absolute(cam["video"]);
     const std::string name = cam["name"] ? cam["name"].as<std::string>() : "";
+    for (const auto& [n, k] : intrinsics) {
+      if (n != name) continue;
+      YAML::Node inline_ = cam["camera"].IsScalar() ? YAML::Clone(YAML::LoadFile(cam["camera"].as<std::string>()))
+                                                    : YAML::Clone(cam["camera"]);
+      if (cam["camera"].IsScalar() && inline_["mask"]) {
+        const std::filesystem::path camFile = cam["camera"].as<std::string>();
+        inline_["mask"] = resolve(camFile.parent_path(), inline_["mask"].as<std::string>()).lexically_normal().generic_string();
+      }
+      const char* keys[] = {"fx", "fy", "cx", "cy", "alpha", "beta"};
+      for (int i = 0; i < 6; ++i) inline_[keys[i]] = k[i];
+      cam["camera"] = inline_;
+    }
     for (const auto& [n, T] : T_b_c) {
       if (n != name) continue;
       const Eigen::Matrix3d R = T.rotationMatrix();

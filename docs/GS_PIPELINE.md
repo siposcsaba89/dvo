@@ -16,7 +16,8 @@ FORWARD=1.55 HEIGHT=1.50 tools/gs_pipeline.sh results/<name>      # FORWARD/HEIG
 ```
 
 [tools/gs_pipeline.sh](../tools/gs_pipeline.sh) runs steps 1-10 with exactly the parameters below. Its settings
-(environment variables) are `VO_CAMS`, `GS_CAMS`, `DA3_GROUPS`, `FORWARD`, `HEIGHT`, and `STOP_AFTER=vo` or
+(environment variables) are `VO_CAMS`, `GS_CAMS`, `DA3_GROUPS`, `VO_ARGS`, `DENSIFY_ARGS`, `REFINE_RIG`, `FORWARD`, `HEIGHT`,
+and `STOP_AFTER=vo` or
 `STOP_AFTER=loops` to stop after that stage and look at the trajectory plots first (run it again to continue). Log: redirect it, e.g.
 `> results/<name>/pipeline.log`; start it with `setsid nohup` so it survives the terminal.
 
@@ -65,15 +66,40 @@ resolution, and the odometry at half of it again (`--scale 0.5`, ~960 px wide). 
 see Inputs) and the masks once (`aimrec_extract ... -o DIR --first 3000 --count 1 --color` writes a frame and the
 mask per camera).
 
+### 0b. Rig rotations (optional, `REFINE_RIG=1`)
+
+```bash
+$B/run_vo --rig $R/rig/rig.yaml --rig-cameras $VO --scale 0.5 -n 3000 $VO_ARGS -o $R/rig_refine/poses.txt \
+    --keyframes-out $R/rig_refine/keyframes.kfr
+$B/close_loops --keyframes $R/rig_refine/keyframes.kfr --poses $R/rig_refine/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
+    --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 --pba-extrinsics --pba-extrinsic-fix-scale \
+    --pba-extrinsic-sigma-t 0.05 \
+    --rig-out $R/rig/rig_refined.yaml --out $R/rig_refine/poses_loop.txt
+```
+
+A joint photometric BA over the first 3000 frames (`RIG_FRAMES`, ~7 GB per 300 keyframes) refines the camera
+extrinsics; the sum of the distances between the cameras is held (`--pba-extrinsic-fix-scale`), so the metric scale
+stays while the cameras can move (5 cm prior). The log lists every baseline's change. All later steps then use
+`rig/rig_refined.yaml` (close_loops takes the extrinsics from the keyframe records, so the odometry has to run with
+the refined rig). Needed when a camera is off: with F_MIDRANGECAM_C in the odometry (Zion autocalib) it is pitched
+-0.16 deg against the others; refined, its points' floater rate halves and the loop drift halves (ROADMAP step 24).
+`--pba-intrinsics [CAMERAS]` refines the intrinsics as well (a calibration check: the Zion autocalib intrinsics
+moved < 0.3 % / 0.6 px, F_MIDRANGECAM_C cy 2 px, i.e. the same pitch).
+
 ### 1. Odometry (CPU, ~40 ms/frame)
 
 ```bash
-$B/run_vo --rig $R/rig/rig.yaml --rig-cameras $VO --scale 0.5 -o $R/poses.txt --keyframes-out $R/keyframes.kfr \
+VO_ARGS="--trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5"
+$B/run_vo --rig $R/rig/rig.yaml --rig-cameras $VO --scale 0.5 $VO_ARGS -o $R/poses.txt --keyframes-out $R/keyframes.kfr \
     --png $R/odometry.png --trajectory-ply $R/odometry_trajectory.ply
 python tools/plot_trajectory.py $R/odometry_trajectory.png $R/poses.txt      # top view by height + height over time
 ```
 
-Odometry on the four CT + neighbour-lane cameras (the fisheyes were worse, see Rejected). Look at `odometry.png`
+Odometry on the four CT + neighbour-lane cameras (the fisheyes were worse, see Rejected). `VO_ARGS`: a good trace
+needs the second-best match along the epipolar line at 3x the best energy (default 2), between the cameras of a
+keyframe too, and a point leaves the window when fewer than half of its residuals in the image are good. Zion
+garage: odometry points 12.9 -> 9.4 % floaters, maximum loop drift 0.29 -> 0.06 m. Stricter settings lose the metric
+scale (ambiguity 5: the run 42 % short): compare the run length with an earlier run. Look at `odometry.png`
 (top view with the map points) and `odometry_trajectory.png` (levels of a multi-storey garage are height plateaus;
 drift shows as a sloping floor). `--ply` would also write the coloured map points, at the cost of decoding every
 keyframe image again; the pipeline does not need them.
@@ -84,7 +110,7 @@ keyframe image again; the pipeline does not need them.
 $B/detect_loops --keyframes $R/keyframes.kfr --vocabulary $V --out $R/loops.txt --verbose
 $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
     --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 [--pba-block-keyframes 200] \
-    --densify --densify-cameras $GS --merge \
+    --densify --densify-cameras $GS --merge --densify-min-quality 3 --free-space \
     --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply
 python tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply
 python tools/plot_trajectory.py $R/diag/trajectory.png $R/poses.txt $R/diag/poses_loop.txt
@@ -105,6 +131,12 @@ blocks of 200 consecutive keyframes with all points, the rest fixed, 2 sweeps pe
 half a block (`--pba-block-sweeps`). Garage check: same final rmse (6.52) and residuals as the joint solve, poses
 within 8 mm median (22 mm max, 0.04 deg) of it, 4.0 GB. Without the coarse solve the blocks drift (a unit test covers
 both). Chili (1357 keyframes, 7.5 M candidate residuals): ~19 GB instead of ~45 GB.
+
+`--densify-min-quality 3`: the same ambiguity threshold for the densify traces. `--free-space`: points that two or
+more other densify host images saw through (they measured a surface clearly behind it) are removed. Zion garage, held
+out views: floaters 3.5 -> 1.2 %, 6 % fewer points, 9 s. `--densify-verify` (refines each point's inverse depth
+over all buffered views and needs photometric agreement in several of them) gets ~0.8 % and a tighter depth, but
+removes ~40 % of the points; not in the default `DENSIFY_ARGS` until a GS comparison.
 
 `poses_loop.txt`: body poses of all frames. `cloud.ply`: densified, merged cloud (neighbour filter 3 within 0.2 m).
 `points.ply`: every point with its attributes (observations, depth sigma, kept); the **trusted points** of the later
@@ -427,3 +459,48 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   Balanced sampling (3 m) at 120 k steps: no image is skipped; uniform would draw each training image 13.5 times,
   balanced 7.1 (10 %) / 9.8 (median) / 28.4 (90 %) times; the weight is capped at the 10 % density, so the
   sparsest images get at most ~2x the uniform rate.
+- 2026-10-01: point quality (ROADMAP step 24). `VO_ARGS` (`--trace-min-quality 3 --static-min-quality 3
+  --point-min-good-fraction 0.5`), `DENSIFY_ARGS` (`--densify-min-quality 3 --free-space`), optional `REFINE_RIG=1`
+  (stage rig, rotations from the first `RIG_FRAMES` frames, translations fixed). `tools/cloud_consistency.py`:
+  floaters and depth agreement of a points.ply without ground truth (free-space test against the densify host images,
+  hold-out mode for filters). 6 cameras with `REFINE_RIG=1 VO_CAMS="$VO B_MIDRANGECAM_C F_MIDRANGECAM_C"`
+  (`results/zion_6cam`, up to the loops): loop drift max 0.07 m (4 cameras, old settings 0.29 m), 5.18 M points,
+  0.5 % floaters (old 3.5 %); the defaults keep 4 odometry cameras until a GS comparison. Not yet trained with GS: the
+  garage reference result above is from the old settings.
+- 2026-10-01: single-image DA3-Large on the whole dense subset (`sub_s1`, 4730 images in 23 min, one camera per call,
+  `--window 0 --no_poses --process_res 952`). The depth-fused cloud was clean on the ramp, the TSDF cloud showed a
+  doubled ramp wall. Cause: F_CTCAM_L frames 1026-1040 were 1.37-1.69x too far. Scored against the points
+  F_CTCAM_L itself tracked (host camera, +-15 frames, so surely visible) instead of all trusted points: 80 % of the
+  trusted points made within 60 frames lie behind the bare ramp wall (the next turn of the ramp), the sparse z-buffer
+  cannot hide them (no points on the wall), the unscaled single-image depth's median prescale lands on them and the
+  consensus keeps them (12 000 points, "solid"). Multi-view DA3 is metric, so `--max_behind` removes them there (it was
+  right on the ramp all along; the earlier "0.75 on the ramp" was the same check artefact, not glass). The ghost
+  check (`ghost_check.py`) marks the real wall here (the far views see through it): it names the images involved,
+  not which side is wrong. `align_depth.py`:
+  - `--host_frames 15`: the points the image's own camera tracked within 15 frames set the starting scale (median),
+    the fit uses the trusted points (`--ref_frames`) within `--anchor_tol` 30 % of it; fewer than `--host_min` 10 own
+    points: neighbour pass. The host camera of the dump's camera index is found by the points' recorded distance.
+  - neighbour pass: weak images are fitted to the nearest `--neighbour_same` 4 solid frames of their own camera
+    (the same wall 0.1 m away, which covers the image and hides what lies behind), nearest first, and fitted images
+    become solid (the scale is passed along the camera); other cameras' depth leaves gaps on a bare wall through
+    which surfaces behind it win the fit (M_NEIGHBORLANECAM_L 1.7x). Neighbour fits start from the front-most
+    group with >= `--neighbour_front` 30 % of the biggest (points can hide behind the surface, not lie in front).
+  - `--drop_weak`: images the scale prior would rescale get no depth (single-image scales are per image, a prior
+    from other frames is a guess).
+  Ramp 990-1080 against own points: F_CTCAM_L 0.99-1.01 everywhere (was 1.37-1.69 on 1026-1040), B_MIDRANGECAM_C
+  0.97-1.04, M_NEIGHBORLANECAM_L 0.88-1.04 up to 1038. Open: M_NEIGHBORLANECAM_R sees only a bare wall (0-3 own
+  points), nothing verifies it (multi-view 1.6 m, single-image variants 1.1-3.6 m); the chained neighbour pass fits
+  it anyway. Full run with these settings: `sub_s1b` (749 of 755 weak images fitted by the chained neighbour pass,
+  7 dropped; `fuse_depth.py` skips images without depth). Its TSDF depth on the ramp reads 0.98-1.00 against the
+  cameras' own points (M_NEIGHBORLANECAM_L 1040-1045 too, its per-image depth 1.36 there). Ghost check (views within
+  6 m): 10.5 % ghost points (first single-image run 11.0 %, multi-view `sub_d10b` 7.1 %), frames 1050-1099 246 k
+  (was 422 k). Test (same 290 images, same training): 33.86, multi-view `sub_d10b` 34.06; per camera -0.03 to
+  -0.43 dB (B_MIDRANGECAM_C worst), upper level 1000-1500 34.49 vs 34.69. Single-image DA3-Large with the fixed
+  alignment is close but not better: multi-view DA3 stays the default. Renders: `sub_upper/renders_s1b`.
+- 2026-10-01: rig stage with the scale constraint (`--pba-extrinsic-fix-scale`, translations free otherwise):
+  `results/zion_6cam_scale`, 6 cameras, loop drift max 0.03 m, 5.10 M points.
+- 2026-10-01: `RIG_POINTS` (points per image of the rig BA, default 120; Chili 6 cameras needs 60: 2.6 M instead of
+  4.6 M residuals, ~9 instead of ~16 GB); the rig stage reuses `rig_refine/keyframes.kfr` if present. Chili, 6 cameras
+  (`results/chili_6cam`, up to the odometry + detect_loops): loop drift median 0.03 m, max 0.15 m (4 cameras, old
+  settings: 0.45 / 1.55 m).
+

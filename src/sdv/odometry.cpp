@@ -180,6 +180,7 @@ TraceSettings Odometry::candidateSettings() const {
   if (multiCamera()) {
     s.rhoMaxInit = 1.0 / m_settings.stereoMinDepth;
     s.maxSamples = m_settings.stereoMaxSamples;
+    s.minQuality = m_settings.staticMinQuality;
   }
   return s;
 }
@@ -306,13 +307,15 @@ void Odometry::activateCandidates(int newKeyframeId) {
       if (cells[c] >= 0) occupied[c][cells[c]] = 1;
   }
 
+  // The first keyframe has only the static traces between its cameras.
+  const int minGood = m_window.frames().size() > 1 ? m_settings.activationMinGood : 1;
   // A cell taken in any camera rejects the candidate, so a surface seen by two cameras is hosted only once.
   for (auto& [id, kf] : m_keyframes) {
     if (id == newKeyframeId && !multiCamera()) continue;  // with several cameras its own candidates are matched
     for (int hc = 0; hc < nc; ++hc) {
       const Sophus::SE3d T_h_w = m_window.cameraPose(id, hc);
       std::erase_if(kf.immature[hc], [&](const ImmaturePoint& p) {
-        if (p.lastStatus() != TraceStatus::Good || p.numGood() < m_settings.activationMinGood ||
+        if (p.lastStatus() != TraceStatus::Good || p.numGood() < minGood ||
             p.lastErrorPixels() > m_settings.activationMaxErrorPixels || p.rho() <= 0)
           return false;
         const auto cells = cellsOf(T_h_w, p.bearing(), p.rho());
@@ -341,8 +344,12 @@ void Odometry::removeOutlierPoints() {
   // supports it: new points are often occluded or strongly warped in keyframes older than their host, which
   // tracing never checked, and dropping them for that starves monocular scale (KITTI 00, frames 4000-4500).
   std::vector<int> remove;
-  for (const auto& p : m_window.points())
-    if (p.numGood() == 0 && !p.residuals.empty()) remove.push_back(p.id);
+  for (const auto& p : m_window.points()) {
+    if (p.residuals.empty()) continue;
+    int inside = 0;
+    for (const auto& r : p.residuals) inside += r.state != ResidualState::OutOfBounds;
+    if (p.numGood() == 0 || p.numGood() < m_settings.pointMinGoodFraction * inside) remove.push_back(p.id);
+  }
   for (int id : remove) m_window.removePoint(id);
 }
 

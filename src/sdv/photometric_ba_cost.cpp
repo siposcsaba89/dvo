@@ -1,6 +1,9 @@
 #include <sdv/photometric_ba_cost.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <vector>
 
 namespace sdv::pba {
 
@@ -238,6 +241,114 @@ bool StaticExtrinsicCost::Evaluate(const double* const* parameters, double* resi
                     setRow(jacobians, 0, k, g * hostSide(R, b, rho));
                     setRow(jacobians, 1, k, g * targetSide(x, rho));
                   });
+  return true;
+}
+
+Camera withIntrinsics(const Camera& cam, const double* k) {
+  Camera c = cam;
+  c.fx = k[0], c.fy = k[1], c.cx = k[2], c.cy = k[3], c.alpha = k[4], c.beta = k[5];
+  return c;
+}
+
+CalibratedCost::CalibratedCost(ExtrinsicCostKind kind, const PointData* point, const Camera* hostCam,
+                               const Camera* targetCam, const Interpolator* image)
+    : m_kind(kind), m_point(point), m_hostCam(hostCam), m_targetCam(targetCam), m_image(image) {
+  std::vector<int> sizes;
+  switch (kind) {
+    case ExtrinsicCostKind::Temporal: sizes = {7, 7, 7, 7, 1, 2, 2, 6, 6}; break;
+    case ExtrinsicCostKind::TemporalSameCamera: sizes = {7, 7, 7, 1, 2, 2, 6}; break;
+    case ExtrinsicCostKind::Static: sizes = {7, 7, 1, 2, 2, 6, 6}; break;
+  }
+  m_inner = static_cast<int>(sizes.size()) - (kind == ExtrinsicCostKind::TemporalSameCamera ? 1 : 2);
+  *mutable_parameter_block_sizes() = sizes;
+  set_num_residuals(kPatternSize);
+}
+
+bool CalibratedCost::evaluate(const double* const* parameters, const double* hostK, const double* targetK,
+                              double* residuals, double** jacobians) const {
+  const Camera host = withIntrinsics(*m_hostCam, hostK), target = withIntrinsics(*m_targetCam, targetK);
+  PointData p = *m_point;
+  for (int k = 0; k < kPatternSize; ++k)
+    if (!host.unproject(Eigen::Vector2d(p.pattern.uv + Eigen::Vector2d(kPattern[k][0], kPattern[k][1])),
+                        p.pattern.bearings[k]))
+      return false;
+  switch (m_kind) {
+    case ExtrinsicCostKind::Temporal: return TemporalExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+    case ExtrinsicCostKind::TemporalSameCamera:
+      return TemporalSameCameraExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+    case ExtrinsicCostKind::Static: return StaticExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+  }
+  return false;
+}
+
+bool CalibratedCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
+  const bool same = m_kind == ExtrinsicCostKind::TemporalSameCamera;
+  const double* hostK = parameters[m_inner];
+  const double* targetK = same ? hostK : parameters[m_inner + 1];
+  if (!evaluate(parameters, hostK, targetK, residuals, jacobians)) return false;
+  if (!jacobians) return true;
+  // Steps of about 0.01 px in the image.
+  static constexpr double kStep[6] = {1e-2, 1e-2, 1e-2, 1e-2, 1e-5, 1e-4};
+  const int blocks = same ? 1 : 2;
+  for (int b = 0; b < blocks; ++b) {
+    double* J = jacobians[m_inner + b];
+    if (!J) continue;
+    for (int j = 0; j < 6; ++j) {
+      std::array<double, 6> plus, minus;
+      std::copy_n(parameters[m_inner + b], 6, plus.data());
+      minus = plus;
+      plus[j] += kStep[j];
+      minus[j] -= kStep[j];
+      double rp[kPatternSize], rm[kPatternSize];
+      const bool ok = b == 0 ? evaluate(parameters, plus.data(), same ? plus.data() : targetK, rp, nullptr) &&
+                                   evaluate(parameters, minus.data(), same ? minus.data() : targetK, rm, nullptr)
+                             : evaluate(parameters, hostK, plus.data(), rp, nullptr) &&
+                                   evaluate(parameters, hostK, minus.data(), rm, nullptr);
+      for (int k = 0; k < kPatternSize; ++k) J[6 * k + j] = ok ? (rp[k] - rm[k]) / (2 * kStep[j]) : 0.0;
+    }
+  }
+  return true;
+}
+
+IntrinsicPriorCost::IntrinsicPriorCost(const Camera& cam, const std::array<double, 6>& sigma)
+    : m_k0{cam.fx, cam.fy, cam.cx, cam.cy, cam.alpha, cam.beta}, m_sigma(sigma) {}
+
+bool IntrinsicPriorCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
+  for (int i = 0; i < 6; ++i) residuals[i] = (parameters[0][i] - m_k0[i]) / m_sigma[i];
+  if (jacobians && jacobians[0]) {
+    std::fill_n(jacobians[0], 36, 0.0);
+    for (int i = 0; i < 6; ++i) jacobians[0][7 * i] = 1.0 / m_sigma[i];
+  }
+  return true;
+}
+
+RigScaleCost::RigScaleCost(int cameras, double sum0, double sigma) : m_cameras(cameras), m_sum0(sum0), m_sigma(sigma) {
+  mutable_parameter_block_sizes()->assign(cameras, 7);
+  set_num_residuals(1);
+}
+
+bool RigScaleCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
+  std::vector<Eigen::Vector3d> c(m_cameras);
+  for (int i = 0; i < m_cameras; ++i) c[i] = Eigen::Map<const Sophus::SE3d>(parameters[i]).translation();
+  std::vector<Eigen::Vector3d> dSum(m_cameras, Eigen::Vector3d::Zero());
+  double sum = 0;
+  for (int i = 0; i < m_cameras; ++i)
+    for (int j = i + 1; j < m_cameras; ++j) {
+      const Eigen::Vector3d d = c[i] - c[j];
+      const double n = d.norm();
+      sum += n;
+      if (n > 1e-12) dSum[i] += d / n, dSum[j] -= d / n;
+    }
+  residuals[0] = (sum - m_sum0) / m_sigma;
+  if (!jacobians) return true;
+  // T exp(delta) moves the centre by R delta_t to first order (rotation increments do not move it).
+  for (int i = 0; i < m_cameras; ++i) {
+    if (!jacobians[i]) continue;
+    std::fill_n(jacobians[i], 7, 0.0);
+    const Eigen::RowVector3d g =
+        (Eigen::Map<const Sophus::SE3d>(parameters[i]).rotationMatrix().transpose() * dSum[i]).transpose() / m_sigma;
+    for (int k = 0; k < 3; ++k) jacobians[i][k] = g[k];
+  }
   return true;
 }
 
