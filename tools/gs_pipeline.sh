@@ -86,11 +86,13 @@ fi
 if stage loops; then
     $B/detect_loops --keyframes $R/keyframes.kfr --vocabulary $V --out $R/loops.txt --verbose > $R/detect_loops.log 2>&1
     mkdir -p $R/diag
-    # Long runs: photometric BA in blocks of 200 keyframes after a coarse joint solve (bounded memory, ~20 GB for
-    # 1400 keyframes instead of ~45 GB); up to 400 keyframes one joint problem (the reference results).
+    # Long runs: one joint photometric BA with a sparse approximation of the reduced system as the preconditioner of
+    # CG on the exact one (voxelnet, 2519 keyframes: 705 s, 23 GB peak, loop residuals 0.5 cm median); PBA_ARGS=
+    # "--pba-block-keyframes 200" for blocks after a coarse joint solve (~17 GB there). Up to 400 keyframes the exact
+    # joint problem (the reference results).
     kf=$(grep -o "[0-9]* keyframes, [0-9]* features" $R/run_vo.log | tail -1 | cut -d' ' -f1)
     blocks=""
-    [ "${kf:-0}" -gt 400 ] && blocks="--pba-block-keyframes 200"
+    [ "${kf:-0}" -gt 400 ] && blocks=${PBA_ARGS:---pba-sparse-band 0 --pba-pcg 30}
     $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $RIG \
         --rig-cameras $VO_CAMS --scale 0.5 --photometric --pba-points 120 $blocks --densify --densify-cameras $GS_CAMS --merge \
         $DENSIFY_ARGS \

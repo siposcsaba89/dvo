@@ -110,7 +110,7 @@ keyframe image again; the pipeline does not need them.
 ```bash
 $B/detect_loops --keyframes $R/keyframes.kfr --vocabulary $V --out $R/loops.txt --verbose
 $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
-    --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 [--pba-block-keyframes 200] \
+    --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 [--pba-sparse-band 0 --pba-pcg 30] \
     --densify --densify-cameras $GS --merge --densify-min-quality 3 --free-space --densify-drop-frames 5 \
     --densify-coarse-step 2 --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply
 python tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply
@@ -126,7 +126,9 @@ constant slope of a level means a remaining tilt, not a bad loop.
 
 **Memory of the photometric BA**: ~3-4 KB per pattern residual in Ceres, plus the keyframe images. The joint problem
 fits up to ~400 keyframes (garage: 270 keyframes, 0.9 M residuals, 5.9 GB). Longer runs use
-`--pba-block-keyframes 200` (the pipeline does so above 400 keyframes): first a joint solve over all keyframes with
+`--pba-sparse-band 0 --pba-pcg 30` (the pipeline does so above 400 keyframes since 2026-10-05: one joint problem, CG
+on the exact reduced system with a sparse approximation as preconditioner; voxelnet 2519 keyframes 23 GB) or
+`--pba-block-keyframes 200` (less memory, `PBA_ARGS`): first a joint solve over all keyframes with
 every m-th point (`--pba-block-coarse-residuals`, 3 M), which fixes the large-scale shape of the trajectory, then
 blocks of 200 consecutive keyframes with all points, the rest fixed, 2 sweeps per round with the borders shifted by
 half a block (`--pba-block-sweeps`). Garage check: same final rmse (6.52) and residuals as the joint solve, poses
@@ -676,4 +678,7 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   points. Odometry keeps step 1 (not tested). Joint sparse + PCG photometric BA on voxelnet (`--pba-sparse-band 0
   --pba-pcg 30` instead of blocks of 200): 705 s (CPU shared with benchmarks) vs 790 s, rmse 7.25 vs 7.28 (different
   residual sets after the outlier rounds), peak 23.4 vs ~17 GB WSL; trajectories differ by 5 cm median, 0.6 m max
-  after a similarity alignment. No reference to tell which is closer: blocks stay the default.
+  after a similarity alignment, mostly on the two ramps (frames 3000-3999 and 9000-9999, no revisits). Against
+  the 2726 loop measurements: joint 0.5 cm median / 1.1 cm 90 % / 0.033 deg, blocks 0.7 / 1.6 cm / 0.042 deg
+  (odometry 12 / 251 cm); the pipeline now runs the joint solve above 400 keyframes (`PBA_ARGS` overrides, e.g.
+  `--pba-block-keyframes 200` when memory is short).
