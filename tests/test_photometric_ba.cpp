@@ -246,7 +246,12 @@ TEST(PhotometricBA, CustomOptimizerMatchesCeres) {
                                                  0.01 * noise(rng), 0.002 * noise(rng), 0.002 * noise(rng),
                                                  0.002 * noise(rng)).finished());
   using Optimizer = sdv::PhotometricBASettings::Optimizer;
-  for (const int blockKeyframes : {0, 4}) {
+  struct Variant {
+    int blockKeyframes, sparseBand, pcg;
+  };
+  for (const auto [blockKeyframes, sparseBand, pcg] : {Variant{0, -1, 0}, Variant{4, -1, 0}, Variant{0, 1, 0},
+                                                       Variant{0, 1, 5}, Variant{4, 0, 5}}) {
+    SCOPED_TRACE(testing::Message() << "blocks " << blockKeyframes << " band " << sparseBand << " pcg " << pcg);
     sdv::PhotometricBASettings settings;
     settings.maxInitialPixelError = 40.0;
     settings.blockKeyframes = blockKeyframes;
@@ -254,6 +259,7 @@ TEST(PhotometricBA, CustomOptimizerMatchesCeres) {
     settings.optimizer = Optimizer::Ceres;
     const auto ceres = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
     settings.optimizer = Optimizer::Custom;
+    settings.sparseBand = sparseBand, settings.pcgIterations = pcg;
     const auto custom = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
     EXPECT_NEAR(custom.rmseAfter, ceres.rmseAfter, 0.01 * ceres.rmseAfter) << "blocks " << blockKeyframes;
     EXPECT_NEAR(static_cast<double>(custom.residuals), static_cast<double>(ceres.residuals), 0.01 * ceres.residuals);

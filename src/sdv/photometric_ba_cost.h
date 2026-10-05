@@ -169,6 +169,15 @@ class RelativePoseCost : public ceres::SizedCostFunction<6, 7, 7> {
   Sophus::Vector6d m_weight;
 };
 
+// TemporalCost / StaticCost without a Ceres object (pba::solve): residuals for the relative pose T_t_h and, with J,
+// the Jacobian rows per pattern pixel in the column order host pose (6), target pose (6), host affine (2), target
+// affine (2), and dr/drho. adjHost = Adj(T_ch_b), adjTarget = Adj(T_ct_b); null for a static pair (pose columns zero).
+using PatternJacobian = Eigen::Matrix<double, kPatternSize, 16>;
+void patternLinearization(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3d& T_t_h,
+                          double rho, const double* ah, const double* at, const Eigen::Matrix<double, 6, 6>* adjHost,
+                          const Eigen::Matrix<double, 6, 6>* adjTarget, double* residuals, PatternJacobian* J,
+                          Eigen::Matrix<double, kPatternSize, 1>* dRho);
+
 // Residuals only (initial checks), same model as the costs.
 void patternResidual(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3d& T_t_h,
                      double rho, const double* ah, const double* at, double* residual);

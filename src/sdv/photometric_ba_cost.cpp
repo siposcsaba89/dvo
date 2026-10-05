@@ -391,6 +391,35 @@ bool RelativePoseCost::Evaluate(const double* const* parameters, double* residua
   return true;
 }
 
+void patternLinearization(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3d& T_t_h,
+                          double rho, const double* ah, const double* at, const Eigen::Matrix<double, 6, 6>* adjHost,
+                          const Eigen::Matrix<double, 6, 6>* adjTarget, double* residuals, PatternJacobian* J,
+                          Eigen::Matrix<double, kPatternSize, 1>* dRho) {
+  const Eigen::Matrix3d R = T_t_h.rotationMatrix();
+  const Eigen::Vector3d& t = T_t_h.translation();
+  const double scale = std::exp(at[0] - ah[0]);
+  if (J) J->setZero(), dRho->setZero();
+  for (int k = 0; k < kPatternSize; ++k) {
+    const Eigen::Vector3d& b = p.pattern.bearings[k];
+    const Eigen::Vector3d x = R * b + rho * t;
+    Eigen::RowVector3d g;
+    if (!pixel(p, cam, image, k, x, scale, ah, at, residuals[k], J ? &g : nullptr)) {
+      residuals[k] = 0;
+      continue;
+    }
+    if (!J) continue;
+    if (adjHost) {  // as TemporalCost
+      J->block<1, 6>(k, 0) = g * hostSide(R, b, rho) * *adjHost;
+      J->block<1, 6>(k, 6) = g * targetSide(x, rho) * *adjTarget;
+    }
+    (*dRho)(k) = g.dot(t);
+    const double s = std::sqrt(p.pattern.gradientWeights[k]);
+    const double hostTerm = p.pattern.intensities[k] - ah[1];
+    (*J)(k, 12) = s * scale * hostTerm, (*J)(k, 13) = s * scale;
+    (*J)(k, 14) = -s * scale * hostTerm, (*J)(k, 15) = -s;
+  }
+}
+
 void patternResidual(const PointData& p, const Camera& cam, const Interpolator& image, const Sophus::SE3d& T_t_h,
                      double rho, const double* ah, const double* at, double* residual) {
   const double scale = std::exp(at[0] - ah[0]);

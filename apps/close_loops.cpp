@@ -218,6 +218,11 @@ int main(int argc, char** argv) {
        "0 = one joint problem)")
       ("pba-block-sweeps", po::value(&pbaSettings.blockSweeps)->default_value(pbaSettings.blockSweeps),
        "sweeps over the blocks per round, borders shifted by half a block")
+      ("pba-sparse-band", po::value(&pbaSettings.sparseBand)->default_value(pbaSettings.sparseBand),
+       "custom optimizer: reduced system with only the keyframe pairs linked by observations or odometry, or at most "
+       "this many apart (the dropped fill-in lumped onto the diagonal; exact gradient, same optimum); -1 = exact")
+      ("pba-pcg", po::value(&pbaSettings.pcgIterations)->default_value(pbaSettings.pcgIterations),
+       "with --pba-sparse-band: CG iterations on the exact reduced system, preconditioned by the sparse one")
       ("pba-optimizer", po::value(&pbaOptimizer)->default_value("custom"),
        "photometric BA optimizer: custom (ours, no per-residual storage) or ceres (the reference; always with "
        "--pba-extrinsics / --pba-intrinsics)")
@@ -654,6 +659,7 @@ int main(int argc, char** argv) {
                                      return imgs;
                                    })
                              : rigFrames(rigFile, denseNames, cameraNames, denseRig, scale, start, stride);
+        images = {};  // not needed any more: densify streams its frames (~10 GB on long runs)
         sdv::SemiDenseMapper mapper(denseRig, dense);
         size_t k = 0;
         for (size_t i = 0; i < poses.size(); ++i) {

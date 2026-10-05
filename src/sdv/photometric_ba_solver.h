@@ -44,13 +44,24 @@ struct SolverOptions {
   int iterations = 30;
   double functionTolerance = 1e-6;  // relative cost change of an accepted step that ends the solve
   int threads = 0;  // 0: all
+  // >= 0: the reduced system keeps only keyframe pairs linked by an observation (host and target) or by odometry, or
+  // at most this many keyframes apart; the Schur fill-in of the other pairs is lumped onto the diagonal (row sums of
+  // its magnitudes, so the matrix stays positive definite and bounds the exact one). Steps use the exact gradient
+  // and are accepted by the exact cost, so the optimum is the same; only the step direction is approximate.
+  // -1: the exact reduced system.
+  int sparseBand = -1;
+  // With sparseBand >= 0: conjugate-gradient iterations on the exact reduced system (applied point by point, not
+  // formed), preconditioned by the sparse one; 0: the sparse system's step as it is.
+  int pcgIterations = 0;
+  double pcgTolerance = 1e-3;  // relative residual
 };
 
 struct SolverSummary {
   double initialCost = 0, finalCost = 0;  // 1/2 sum of the robustified squared norms, as Ceres reports it
   int iterations = 0, accepted = 0;
-  double total = 0, structure = 0, linearize = 0, factorize = 0, evaluate = 0;  // s
-  int reducedSize = 0;
+  double total = 0, structure = 0, linearize = 0, factorize = 0, pcg = 0, evaluate = 0;  // s
+  int reducedSize = 0, pcgIterations = 0;
+  size_t blocks = 0;  // keyframe pair blocks of the reduced system
 };
 
 SolverSummary solve(const SolverProblem& problem, const SolverOptions& options = {});

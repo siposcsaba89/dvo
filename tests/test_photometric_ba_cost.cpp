@@ -244,3 +244,40 @@ TEST(PhotometricBACost, RigScaleJacobiansMatchNumeric) {
   for (int b = 0; b < 4; ++b)
     expectClose(analyticJacobian(cost, params, b, true), numericJacobian(cost, params, b, true), "rig scale");
 }
+
+// pba::solve's Ceres-free linearisation: the same residuals and Jacobians as TemporalCost and StaticCost.
+TEST(PhotometricBACost, PatternLinearizationMatchesTheCosts) {
+  const Sophus::SE3d T_w_h(Sophus::SO3d::rotZ(0.1), Eigen::Vector3d(0.2, -0.1, 0.05));
+  const Sophus::SE3d T_w_t(Sophus::SO3d::rotZ(0.15) * Sophus::SO3d::rotX(0.02), Eigen::Vector3d(0.5, 0.05, 0.0));
+  const Scene s(T_w_h, T_w_t);
+  const double ah[2] = {0.05, 2.0}, at[2] = {-0.03, -1.0};
+  const sdv::pba::TemporalCost cost(&s.point, &s.cam, s.interpolator.get(), s.T_c_b, s.T_c_b.inverse());
+  const std::vector<std::vector<double>> params = {poseParams(T_w_h), poseParams(T_w_t), {s.rho}, {ah[0], ah[1]},
+                                                   {at[0], at[1]}};
+  const Sophus::SE3d T_t_h = s.T_c_b * T_w_t.inverse() * T_w_h * s.T_c_b.inverse();
+  const Eigen::Matrix<double, 6, 6> adj = s.T_c_b.Adj();
+  double r[sdv::kPatternSize];
+  sdv::pba::PatternJacobian J;
+  Eigen::Matrix<double, sdv::kPatternSize, 1> dRho;
+  sdv::pba::patternLinearization(s.point, s.cam, *s.interpolator, T_t_h, s.rho, ah, at, &adj, &adj, r, &J, &dRho);
+  const int columns[] = {0, 6, -1, 12, 14};
+  for (int b = 0; b < 5; ++b) {
+    const Eigen::MatrixXd expected = analyticJacobian(cost, params, b, b < 2);
+    const Eigen::MatrixXd got = b == 2 ? Eigen::MatrixXd(dRho) : Eigen::MatrixXd(J.middleCols(columns[b], expected.cols()));
+    EXPECT_LT((got - expected).cwiseAbs().maxCoeff(), 1e-9) << "block " << b;
+    expectClose(got, numericJacobian(cost, params, b, b < 2), "pattern linearisation");
+  }
+  double rc[sdv::kPatternSize];
+  std::vector<const double*> ptrs;
+  for (const auto& v : params) ptrs.push_back(v.data());
+  cost.Evaluate(ptrs.data(), rc, nullptr);
+  for (int k = 0; k < sdv::kPatternSize; ++k) EXPECT_NEAR(r[k], rc[k], 1e-9);
+
+  const sdv::pba::StaticCost staticCost(&s.point, &s.cam, s.interpolator.get(), T_t_h);
+  sdv::pba::patternLinearization(s.point, s.cam, *s.interpolator, T_t_h, s.rho, ah, at, nullptr, nullptr, r, &J, &dRho);
+  const std::vector<std::vector<double>> staticParams = {{s.rho}, {ah[0], ah[1]}, {at[0], at[1]}};
+  EXPECT_TRUE(J.leftCols<12>().isZero());
+  EXPECT_LT((Eigen::MatrixXd(dRho) - analyticJacobian(staticCost, staticParams, 0, false)).cwiseAbs().maxCoeff(), 1e-9);
+  EXPECT_LT((Eigen::MatrixXd(J.middleCols<2>(12)) - analyticJacobian(staticCost, staticParams, 1, false)).cwiseAbs().maxCoeff(), 1e-9);
+  EXPECT_LT((Eigen::MatrixXd(J.middleCols<2>(14)) - analyticJacobian(staticCost, staticParams, 2, false)).cwiseAbs().maxCoeff(), 1e-9);
+}

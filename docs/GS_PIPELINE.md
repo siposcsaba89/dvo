@@ -596,3 +596,17 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   28 M candidate residuals): Ceres ran out of memory twice (process ~29 GB; Windows' commit limit is RAM + a 4 GB
   pagefile, and a Windows process took 14.6 GB more); custom: 14.7 GB peak in the BA, coarse solve 36 s (Ceres 71 s,
   same cost), blocks 13-26 s (Ceres 49-78 s).
+  Then: `pba::patternLinearization` (the TemporalCost / StaticCost model without a Ceres object, camera adjoints and
+  inverse poses once per state; tested against both costs), the trial step's cost from linearising there (no extra
+  evaluation pass; the points are damped with the lambda of the step before): garage blocks 93 -> 67 s, still within
+  0.04 mm of Ceres' blocks. Sparse reduced system (`--pba-sparse-band N`: only keyframe pairs linked by an
+  observation or odometry, or at most N apart; the dropped Schur fill-in lumped onto the diagonal as row sums of its
+  magnitudes, positive definite) with `--pba-pcg K` CG iterations on the exact reduced system (applied point by point,
+  not formed) preconditioned by it: exact gradient and cost, so the same optimum. Garage joint (260 keyframes; poses
+  against Ceres' joint solve): exact 194 s, 0.015 mm; band 5 without CG 40 s but not converged (5.3 mm median);
+  band 0 / 5 + PCG 10 40-44 s, 0.8 mm (CG at its limit every step); band 0 + PCG 30 48 s, 0.27 / 0.44 mm
+  (median / max), 2.1 GB. Blocks of 100 are 2.1 / 5.1 mm from the joint optimum (Ceres or ours) and take 67 s: the
+  joint sparse + PCG solve is faster and closer. Inside blocks sparsifying does not help (factorising is small
+  there). `close_loops` frees the keyframe images before densify (it streams its frames); `gs_pipeline.sh` adds
+  B_MIDRANGECAM_C to `GS_CAMS` only when `VO_CAMS` lacks it (listed twice, close_loops stopped after the BA with
+  "--densify-cameras: unknown camera", the first voxelnet run).

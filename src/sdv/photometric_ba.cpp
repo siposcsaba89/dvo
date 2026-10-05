@@ -255,6 +255,7 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   for (size_t i = 0; i < interpolators.size(); ++i) imagePtrs[i] = interpolators[i].get();
   pba::SolverOptions solverOptions;
   solverOptions.iterations = settings.iterations;
+  solverOptions.sparseBand = settings.sparseBand, solverOptions.pcgIterations = settings.pcgIterations;
   auto solverProblem = [&] {
     pba::SolverProblem sp;
     sp.rig = &rig, sp.points = &points, sp.images = &imagePtrs, sp.poses = &poses, sp.affine = &affine, sp.rho = &rho;
@@ -265,10 +266,10 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     if (settings.odometrySigmaFactor > 0) sp.odometry.push_back({k, std::shared_ptr<const pba::RelativePoseCost>(odometryCost(k))});
   };
   auto solverTiming = [](const pba::SolverSummary& sm) {
-    return fmt::format("{:.1f} s: structure {:.1f}, linearize {:.1f}, factorize {:.1f}, evaluate {:.1f}; {} iterations "
-                       "({} accepted), reduced system {}",
-                       sm.total, sm.structure, sm.linearize, sm.factorize, sm.evaluate, sm.iterations, sm.accepted,
-                       sm.reducedSize);
+    return fmt::format("{:.1f} s: structure {:.1f}, linearize {:.1f}, factorize {:.1f}, pcg {:.1f} ({}), evaluate {:.1f}; "
+                       "{} iterations ({} accepted), reduced system {}, {} blocks",
+                       sm.total, sm.structure, sm.linearize, sm.factorize, sm.pcg, sm.pcgIterations, sm.evaluate,
+                       sm.iterations, sm.accepted, sm.reducedSize, sm.blocks);
   };
 
   if (useBlocks || custom) {

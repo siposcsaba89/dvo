@@ -39,7 +39,8 @@ DA3=/home/csaba/mamba/envs/depth-anything-3/bin/python
 B=$DVO/build/linux/Release
 V=$DVO/results/voc_k10l5.fbow
 VO_CAMS=${VO_CAMS:-F_CTCAM_L F_CTCAM_R M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R}
-GS_CAMS=${GS_CAMS:-$VO_CAMS B_MIDRANGECAM_C}
+# B_MIDRANGECAM_C added unless the odometry has it already (a camera listed twice stops close_loops).
+GS_CAMS=${GS_CAMS:-$VO_CAMS$([[ " $VO_CAMS " == *" B_MIDRANGECAM_C "* ]] || echo " B_MIDRANGECAM_C")}
 DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R:B_MIDRANGECAM_C"}
 # Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
 VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}

@@ -47,6 +47,10 @@ struct PhotometricBASettings {
   // with refineExtrinsics / refineIntrinsics; `solver` applies to it only.
   enum class Optimizer { Custom, Ceres };
   Optimizer optimizer = Optimizer::Custom;
+  // Custom only: sparsified reduced system (pba::SolverOptions::sparseBand, -1 = exact) and CG iterations on the exact
+  // one preconditioned by it (0 = the sparse system's step).
+  int sparseBand = -1;
+  int pcgIterations = 0;
   int iterations = 30;
   PhotometricSettings photometric;
   // Optional: also refine the rig extrinsics T_c_b (one per camera, shared by all keyframes; camera 0 stays fixed as
