@@ -52,7 +52,13 @@ class SemiDenseMapper {
   // brightness per camera; host: whether this frame's images get new points (e.g. keyframes).
   void addFrame(int frameIndex, const std::vector<cv::Mat>& images, const Sophus::SE3d& T_w_b,
                 const std::vector<AffineBrightness>& affine, bool host);
-  std::vector<MapPoint> finish();
+  // Appends the points to `out` (no copy of the cloud); the other form returns them.
+  void finish(std::vector<MapPoint>& out);
+  std::vector<MapPoint> finish() {
+    std::vector<MapPoint> out;
+    finish(out);
+    return out;
+  }
 
   struct Stats {
     long long traces = 0, good = 0, candidates = 0, accepted = 0, merged = 0;

@@ -16,7 +16,7 @@ struct PointMergeSettings {
 // merged when each is the other's nearest neighbour within maxDistance among the points of hosts minFrameGap apart.
 // The merged position is weighted by 1/distance^2 (depth precision falls with the distance from the host camera);
 // the host (frame, camera, pixel, distance) of the closer point is kept and the observations are summed.
-std::vector<MapPoint> mergeDuplicatePoints(const std::vector<MapPoint>& points, const PointMergeSettings& settings,
+std::vector<MapPoint> mergeDuplicatePoints(std::vector<MapPoint> points, const PointMergeSettings& settings,
                                            size_t* merged = nullptr);
 
 }  // namespace sdv

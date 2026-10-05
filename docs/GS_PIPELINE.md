@@ -655,3 +655,11 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   take ~0.9 GB of GPU memory; `--decode cpu` next to a GPU job that needs all of it. The tests
   `MonoInitializerTest.ForwardMotionWithYaw/Pinhole` and `WindowOptimizerTest.MarginalizationKeepsOptimum...`
   fail already at 43e21dc (not decoding related, open).
+- 2026-10-05: densify memory. voxelnet 20260401T105922Z (16123 frames, 6 cameras): the close_loops guard (WSL used
+  > 28 GB) fired at the end of densify: the voxel check (a map of cells, ~150 B per point) on 75 M accepted points,
+  and the merge (input copy + hash grid + output, ~420 B per point) was next. Now the voxel check and the merge sort
+  instead (32 / 16 B per point), the merge compacts in place, densify appends to the cloud without a copy, and
+  `malloc_trim` returns the BA's freed heap before densify (close_loops 12.5 -> 3.7 GB at densify start); clouds
+  byte-identical (garage subset). Rerun: peak 18.3 GB WSL; BA 790 s, densify 1463 s (traces 1046, waiting for frames
+  6.6), 74.8 M accepted -> 63.9 M after the voxel check -> merge 45.5 M (19.4 M pairs, 16 s) -> free space -2.76 M
+  (337 s) -> 42.7 M points written. Trajectory: `diag/trajectory_loop.ply` (levelled, blue -> red over time).

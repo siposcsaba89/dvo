@@ -20,6 +20,10 @@
 #include <thread>
 #include <vector>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 #include <boost/program_options.hpp>
 #include <fmt/format.h>
 #include <opencv2/imgproc.hpp>
@@ -737,6 +741,10 @@ int main(int argc, char** argv) {
                              : rigFrames(rigFile, denseNames, cameraNames, denseRig, scale,
                                          start + static_cast<int>(densifyFirstFrame) * stride, stride);
         images = {};  // not needed any more: densify streams its frames (~10 GB on long runs)
+#ifdef __GLIBC__
+        // The BA's freed heap stays with the process otherwise (~10 GB on long runs, counted by WSL and Windows).
+        malloc_trim(0);
+#endif
         sdv::SemiDenseMapper mapper(denseRig, dense);
         size_t k = 0;
         double decodeTime = 0;
@@ -771,22 +779,30 @@ int main(int argc, char** argv) {
           mapper.addFrame(static_cast<int>(i), frame, poses[i], brightness, host);
           if ((i + 1) % 200 == 0) spdlog::info("densify: {} frames", i + 1);
         }
-        std::vector<sdv::MapPoint> densePoints = mapper.finish();
+        const size_t first = cloud.size();
+        mapper.finish(cloud);
+        const size_t numDense = cloud.size() - first;
         std::vector<double> d;
-        for (const auto& p : densePoints) d.push_back(p.distance);
+        for (size_t i = first; i < cloud.size(); ++i) d.push_back(cloud[i].distance);
         double limit = std::numeric_limits<double>::infinity();
         if (!d.empty()) {
           std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
           limit = maxDistanceFactor * d[d.size() / 2];
         }
         const auto& st = mapper.stats();
-        size_t added = 0;
-        for (const auto& p : densePoints)
-          if (p.distance <= limit) cloud.push_back(p), ++added;
+        d = {};
+        size_t w = first;
+        for (size_t i = first; i < cloud.size(); ++i)
+          if (cloud[i].distance <= limit) {
+            if (w != i) cloud[w] = std::move(cloud[i]);
+            ++w;
+          }
+        cloud.resize(w);
+        const size_t added = w - first;
         spdlog::info("densify: {} candidates, {:.1f} good traces each, {} accepted (rejected: {} too few matches, {} "
                      "imprecise, {} by verification), {} after voxel check, {} within {:.1f} m, {:.1f} s",
                      st.candidates, static_cast<double>(st.good) / std::max<long long>(st.candidates, 1), st.accepted,
-                     st.rejectMatches, st.rejectInterval, st.rejectVerify, densePoints.size(), added, limit,
+                     st.rejectMatches, st.rejectInterval, st.rejectVerify, numDense, added, limit,
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         spdlog::info("densify time: waiting for frames {:.1f} s, pyramids {:.1f}, traces {:.1f}, new hosts {:.1f}, "
                      "closing {:.1f}; {} frames skipped (little motion)",
@@ -795,7 +811,7 @@ int main(int argc, char** argv) {
       if (merge) {
         size_t merged = 0;
         const size_t unmerged = cloud.size();
-        cloud = sdv::mergeDuplicatePoints(cloud, mergeSettings, &merged);
+        cloud = sdv::mergeDuplicatePoints(std::move(cloud), mergeSettings, &merged);
         spdlog::info("merge: {} -> {} points ({} pairs within {:.3f} m, hosts {}+ frames apart)", unmerged, cloud.size(),
                      merged, mergeSettings.maxDistance, mergeSettings.minFrameGap);
       }

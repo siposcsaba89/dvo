@@ -7,7 +7,8 @@
 #include <execution>
 #include <limits>
 #include <numeric>
-#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace sdv {
 
@@ -38,9 +39,8 @@ MapPoint mergePair(const MapPoint& a, const MapPoint& b) {
 
 }  // namespace
 
-std::vector<MapPoint> mergeDuplicatePoints(const std::vector<MapPoint>& input, const PointMergeSettings& settings,
+std::vector<MapPoint> mergeDuplicatePoints(std::vector<MapPoint> points, const PointMergeSettings& settings,
                                            size_t* merged) {
-  std::vector<MapPoint> points = input;
   size_t total = 0;
   const double r = settings.maxDistance;
   for (int round = 0; round < settings.rounds && r > 0 && points.size() > 1; ++round) {
@@ -49,11 +49,13 @@ std::vector<MapPoint> mergeDuplicatePoints(const std::vector<MapPoint>& input, c
                                       static_cast<long long>(std::floor(x.y() / r)),
                                       static_cast<long long>(std::floor(x.z() / r))};
     };
-    std::unordered_map<std::uint64_t, std::vector<size_t>> grid;
+    // Cells as a sorted list (16 bytes per point; a hash map of vectors took ~120 on long runs).
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> grid(points.size());
     for (size_t i = 0; i < points.size(); ++i) {
       const auto c = cell(points[i].position);
-      grid[cellKey(c[0], c[1], c[2])].push_back(i);
+      grid[i] = {cellKey(c[0], c[1], c[2]), static_cast<std::uint32_t>(i)};
     }
+    std::sort(std::execution::par, grid.begin(), grid.end());
     constexpr size_t kNone = std::numeric_limits<size_t>::max();
     std::vector<size_t> nearest(points.size(), kNone);
     std::vector<size_t> order(points.size());
@@ -64,9 +66,10 @@ std::vector<MapPoint> mergeDuplicatePoints(const std::vector<MapPoint>& input, c
       for (long long dx = -1; dx <= 1; ++dx)
         for (long long dy = -1; dy <= 1; ++dy)
           for (long long dz = -1; dz <= 1; ++dz) {
-            const auto it = grid.find(cellKey(c[0] + dx, c[1] + dy, c[2] + dz));
-            if (it == grid.end()) continue;
-            for (size_t j : it->second) {
+            const std::uint64_t key = cellKey(c[0] + dx, c[1] + dy, c[2] + dz);
+            auto it = std::lower_bound(grid.begin(), grid.end(), std::pair<std::uint64_t, std::uint32_t>{key, 0});
+            for (; it != grid.end() && it->first == key; ++it) {
+              const size_t j = it->second;
               if (j == i) continue;
               if (points[j].frameIndex == points[i].frameIndex && points[j].camera == points[i].camera) continue;
               if (std::abs(points[j].frameIndex - points[i].frameIndex) < settings.minFrameGap) continue;
@@ -75,18 +78,24 @@ std::vector<MapPoint> mergeDuplicatePoints(const std::vector<MapPoint>& input, c
             }
           }
     });
-    std::vector<MapPoint> next;
-    next.reserve(points.size());
-    size_t count = 0;
+    grid = {};
+    order = {};
+    // In place: a pair is written at or before its first point, the second one is still unread.
+    size_t count = 0, w = 0;
     for (size_t i = 0; i < points.size(); ++i) {
       const size_t j = nearest[i];
       if (j != kNone && nearest[j] == i) {
-        if (i < j) next.push_back(mergePair(points[i], points[j])), ++count;
+        if (i < j) {
+          MapPoint m = mergePair(points[i], points[j]);
+          points[w++] = std::move(m);
+          ++count;
+        }
       } else {
-        next.push_back(points[i]);
+        if (w != i) points[w] = std::move(points[i]);
+        ++w;
       }
     }
-    points = std::move(next);
+    points.resize(w);
     total += count;
     if (count == 0) break;
   }

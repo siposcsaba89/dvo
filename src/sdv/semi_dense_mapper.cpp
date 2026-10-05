@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <execution>
-#include <map>
 #include <numeric>
 #include <stdexcept>
+#include <tuple>
 
 #include <sdv/parallel.h>
 
@@ -275,41 +276,59 @@ void SemiDenseMapper::close(Host& h) {
   h.points.clear();
 }
 
-std::vector<MapPoint> SemiDenseMapper::finish() {
+void SemiDenseMapper::finish(std::vector<MapPoint>& out) {
   for (Host& h : m_hosts) close(h);
   m_hosts.clear();
-  if (m_settings.voxelSize <= 0) return std::move(m_points);
+  if (m_settings.voxelSize <= 0) {
+    out.reserve(out.size() + m_points.size());
+    std::ranges::move(m_points, std::back_inserter(out));
+    m_points = {};
+    return;
+  }
 
   // The number of distinct host images in a voxel is a multi-view consistency check, since independently traced
-  // hosts agree only on real surfaces.
-  struct Cell {
-    size_t best;
-    std::vector<std::pair<int, int>> hosts;
-    std::vector<size_t> members;
+  // hosts agree only on real surfaces. Voxels by sorting (a map of cells took ~150 bytes per point on long runs);
+  // the output is ordered by voxel, then by point.
+  struct Entry {
+    std::array<long long, 3> key;
+    std::size_t index;
   };
-  std::map<std::array<long long, 3>, Cell> grid;
-  for (size_t i = 0; i < m_points.size(); ++i) {
+  std::vector<Entry> entries(m_points.size());
+  for (std::size_t i = 0; i < m_points.size(); ++i) {
     const Eigen::Vector3d& x = m_points[i].position;
-    const std::array<long long, 3> key{static_cast<long long>(std::floor(x.x() / m_settings.voxelSize)),
-                                       static_cast<long long>(std::floor(x.y() / m_settings.voxelSize)),
-                                       static_cast<long long>(std::floor(x.z() / m_settings.voxelSize))};
-    auto [it, inserted] = grid.try_emplace(key, Cell{i, {}, {}});
-    Cell& cell = it->second;
-    if (m_points[i].relativeDepthSigma < m_points[cell.best].relativeDepthSigma) cell.best = i;
-    const std::pair<int, int> host{m_points[i].frameIndex, m_points[i].camera};
-    if (std::find(cell.hosts.begin(), cell.hosts.end(), host) == cell.hosts.end()) cell.hosts.push_back(host);
-    cell.members.push_back(i);
+    entries[i] = {{static_cast<long long>(std::floor(x.x() / m_settings.voxelSize)),
+                   static_cast<long long>(std::floor(x.y() / m_settings.voxelSize)),
+                   static_cast<long long>(std::floor(x.z() / m_settings.voxelSize))},
+                  i};
   }
-  std::vector<MapPoint> out;
-  for (const auto& [key, cell] : grid) {
-    if (static_cast<int>(cell.hosts.size()) < m_settings.minVoxelHosts) continue;
-    if (m_settings.thin) out.push_back(m_points[cell.best]);
+  std::sort(std::execution::par, entries.begin(), entries.end(),
+            [](const Entry& a, const Entry& b) { return std::tie(a.key, a.index) < std::tie(b.key, b.index); });
+  // Calls keep(begin, end, best) for the voxels that pass, as entry ranges.
+  std::vector<std::pair<int, int>> hosts;
+  auto forKept = [&](auto&& keep) {
+    for (std::size_t begin = 0; begin < entries.size();) {
+      std::size_t end = begin, best = entries[begin].index;
+      hosts.clear();
+      for (; end < entries.size() && entries[end].key == entries[begin].key; ++end) {
+        const MapPoint& p = m_points[entries[end].index];
+        if (p.relativeDepthSigma < m_points[best].relativeDepthSigma) best = entries[end].index;
+        const std::pair<int, int> host{p.frameIndex, p.camera};
+        if (std::ranges::find(hosts, host) == hosts.end()) hosts.push_back(host);
+      }
+      if (static_cast<int>(hosts.size()) >= m_settings.minVoxelHosts) keep(begin, end, best);
+      begin = end;
+    }
+  };
+  std::size_t kept = 0;
+  forKept([&](std::size_t begin, std::size_t end, std::size_t) { kept += m_settings.thin ? 1 : end - begin; });
+  out.reserve(out.size() + kept);
+  forKept([&](std::size_t begin, std::size_t end, std::size_t best) {
+    if (m_settings.thin) out.push_back(std::move(m_points[best]));
     else
-      for (size_t i : cell.members) out.push_back(m_points[i]);
-  }
-  m_stats.merged = static_cast<long long>(out.size());
-  m_points.clear();
-  return out;
+      for (std::size_t k = begin; k < end; ++k) out.push_back(std::move(m_points[entries[k].index]));
+  });
+  m_stats.merged = static_cast<long long>(kept);
+  m_points = {};
 }
 
 }  // namespace sdv
