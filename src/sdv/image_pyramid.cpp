@@ -20,6 +20,8 @@ void parallelRows(int rows, RowBody&& rowBody) {
 void fillGradients(ImageLevel& lvl) {
   const int w = lvl.width, h = lvl.height;
   lvl.gradNormSq.assign(static_cast<size_t>(w) * h, 0.f);
+  lvl.intensity.resize(static_cast<size_t>(w) * h);
+  for (size_t i = 0; i < lvl.intensity.size(); ++i) lvl.intensity[i] = lvl.data[i][0];
   // Central differences; border pixels keep zero gradient.
   parallelRows(h, [&](int v) {
     if (v == 0 || v == h - 1) return;

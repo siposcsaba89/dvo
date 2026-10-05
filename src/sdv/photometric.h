@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <optional>
 
 #include <Eigen/Core>
@@ -73,7 +74,13 @@ bool evaluatePatternResidual(const PatternPoint& point, double rho, const HostTa
 inline Eigen::Matrix<double, 6, 6> dRelativeDTarget() { return Eigen::Matrix<double, 6, 6>::Identity(); }
 inline Eigen::Matrix<double, 6, 6> dRelativeDHost(const Sophus::SE3d& T_t_h) { return -T_t_h.Adj(); }
 
-double huberWeight(double r, double k);
-double huberEnergy(double r, double k);
+inline double huberWeight(double r, double k) {
+  const double a = std::abs(r);
+  return a <= k ? 1.0 : k / a;
+}
+inline double huberEnergy(double r, double k) {
+  const double a = std::abs(r);
+  return a <= k ? 0.5 * r * r : k * (a - 0.5 * k);
+}
 
 }  // namespace sdv

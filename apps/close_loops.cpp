@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
   sdv::PhotometricBASettings pbaSettings;
   std::string pbaSolver, pbaOptimizer;
   double densifyMinMotion = 0, densifyMinRotationDeg = 0;
-  size_t densifyMaxFrames = 0;
+  size_t densifyMaxFrames = 0, densifyFirstFrame = 0;
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -328,8 +328,10 @@ int main(int argc, char** argv) {
        "candidate pixels per keyframe image")
       ("densify-frames", po::value(&dense.traceFrames)->default_value(dense.traceFrames),
        "following input frames each keyframe host is traced into")
+      ("densify-first-frame", po::value(&densifyFirstFrame)->default_value(densifyFirstFrame),
+       "densify from this frame on (tests)")
       ("densify-max-frames", po::value(&densifyMaxFrames)->default_value(densifyMaxFrames),
-       "> 0: densify only the first this many frames (tests)")
+       "> 0: densify only this many frames (tests)")
       ("densify-drop-frames", po::value(&dense.dropFrames)->default_value(dense.dropFrames),
        "> 0: candidates without a good trace this many frames after their host are not traced further")
       ("densify-min-motion", po::value(&densifyMinMotion)->default_value(densifyMinMotion),
@@ -716,21 +718,23 @@ int main(int argc, char** argv) {
                              ? std::function<std::vector<cv::Mat>()>(
                                    [&, seq = std::make_shared<sdv::KittiSequence>(sequenceDir, 1), i = size_t{0}]() mutable {
                                      std::vector<cv::Mat> imgs;
-                                     const size_t index = static_cast<size_t>(start) + i++ * stride;
+                                     const size_t index = static_cast<size_t>(start) + (densifyFirstFrame + i++) * stride;
                                      if (index >= seq->size()) return imgs;
                                      for (int c = 0; c < rig.size(); ++c)
                                        imgs.push_back(sdv::prepareImage(seq->loadImage(index, c), scale, rig.cameras[c]));
                                      return imgs;
                                    })
-                             : rigFrames(rigFile, denseNames, cameraNames, denseRig, scale, start, stride);
+                             : rigFrames(rigFile, denseNames, cameraNames, denseRig, scale,
+                                         start + static_cast<int>(densifyFirstFrame) * stride, stride);
         images = {};  // not needed any more: densify streams its frames (~10 GB on long runs)
         sdv::SemiDenseMapper mapper(denseRig, dense);
         size_t k = 0;
         double decodeTime = 0;
         std::optional<Sophus::SE3d> lastTraced;
         size_t skippedFrames = 0;
-        const size_t densifyFrames = densifyMaxFrames > 0 ? std::min(densifyMaxFrames, poses.size()) : poses.size();
-        for (size_t i = 0; i < densifyFrames; ++i) {
+        const size_t densifyEnd =
+            densifyMaxFrames > 0 ? std::min(densifyFirstFrame + densifyMaxFrames, poses.size()) : poses.size();
+        for (size_t i = densifyFirstFrame; i < densifyEnd; ++i) {
           const auto td = std::chrono::steady_clock::now();
           const std::vector<cv::Mat> frame = nextFrame();
           decodeTime += std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count();

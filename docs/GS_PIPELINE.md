@@ -632,3 +632,10 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   (standstill traces are cheap: the search line is too short), trusted -3.5 % (fewer observations): rejected.
   Windows ran out of commit again (15:54): another session's training job (Windows python, 13.5 GB) next to
   WSL's 29 GB with the 4 GB pagefile; the voxelnet densify died at frame 9400 of 16123.
+  Trace kernel (gperftools CPU profile of frames 1000-1299, `--densify-first-frame` / `--densify-max-frames`):
+  bearing rotated once per trace instead of per sample, brightness scale (an exp) once per trace, the warped pattern
+  offsets once per trace, Huber functions inline, an intensity-only plane per pyramid level for the search, the
+  pyramids of a frame built in parallel: traces 23.0 -> 18.1 s, densify 32.0 -> 26.9 s, cloud byte-identical. Left
+  in a trace: pattern energy 32 % (bilinear lookups 12 %, Huber 8 %), EUCM projection 19 %, local warp 9 %. The
+  decode thread takes ~25 % of the CPU (two INTER_AREA resizes per frame, 2896 -> 1936 -> 968 px), shared with
+  the tracing.

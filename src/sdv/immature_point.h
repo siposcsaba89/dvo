@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 
 #include <Eigen/Core>
@@ -51,8 +52,10 @@ class ImmaturePoint {
  private:
   ImmaturePoint() = default;
 
-  double patternEnergy(const Eigen::Vector2d& uv, const Eigen::Matrix2d& warp, const ImageLevel& img,
-                       const HostTargetState& state, double huber) const;
+  // offsets: the pattern warped into the target (warp * pattern offset), and scale: state.brightnessScale(), once per
+  // trace.
+  double patternEnergy(const Eigen::Vector2d& uv, const std::array<Eigen::Vector2d, kPatternSize>& offsets,
+                       const ImageLevel& img, const HostTargetState& state, double scale, double huber) const;
   bool localWarp(const Camera& cam, double rho, const Sophus::SE3d& T_t_h, Eigen::Matrix2d& A) const;
 
   PatternPoint m_pattern;

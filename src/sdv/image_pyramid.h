@@ -11,6 +11,7 @@ struct ImageLevel {
   int width = 0, height = 0;
   std::vector<Eigen::Vector3f> data;  // (I, dI/du, dI/dv), interleaved for one-lookup interpolation
   std::vector<float> gradNormSq;
+  std::vector<float> intensity;  // I alone: the epipolar search reads only the intensity
 
   const Eigen::Vector3f& at(int u, int v) const { return data[v * width + u]; }
 
@@ -28,9 +29,8 @@ struct ImageLevel {
     const int iu = static_cast<int>(u);
     const int iv = static_cast<int>(v);
     const float du = u - iu, dv = v - iv;
-    const Eigen::Vector3f* p = &data[iv * width + iu];
-    return (1 - dv) * ((1 - du) * p[0][0] + du * p[1][0]) +
-           dv * ((1 - du) * p[width][0] + du * p[width + 1][0]);
+    const float* p = &intensity[iv * width + iu];
+    return (1 - dv) * ((1 - du) * p[0] + du * p[1]) + dv * ((1 - du) * p[width] + du * p[width + 1]);
   }
 };
 

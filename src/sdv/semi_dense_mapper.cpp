@@ -48,10 +48,11 @@ void SemiDenseMapper::addFrame(int frameIndex, const std::vector<cv::Mat>& image
   std::vector<std::shared_ptr<const ImagePyramid>> pyr(nc);
   std::vector<Sophus::SE3d> T_c_w(nc);
   auto t0 = Clock::now();
-  for (int c = 0; c < nc; ++c) {
-    pyr[c] = std::make_shared<const ImagePyramid>(toFloatGray(images[c]), 1);
-    T_c_w[c] = m_rig.T_c_b[c] * T_w_b.inverse();
-  }
+  std::vector<int> cams(nc);
+  std::iota(cams.begin(), cams.end(), 0);
+  std::for_each(std::execution::par, cams.begin(), cams.end(),
+                [&](int c) { pyr[c] = std::make_shared<const ImagePyramid>(toFloatGray(images[c]), 1); });
+  for (int c = 0; c < nc; ++c) T_c_w[c] = m_rig.T_c_b[c] * T_w_b.inverse();
   m_stats.pyramid += since(t0);
   if (m_settings.verify) m_frames.push_back({frameIndex, pyr, T_c_w, affine});
 

@@ -4,16 +4,6 @@
 
 namespace sdv {
 
-double huberWeight(double r, double k) {
-  const double a = std::abs(r);
-  return a <= k ? 1.0 : k / a;
-}
-
-double huberEnergy(double r, double k) {
-  const double a = std::abs(r);
-  return a <= k ? 0.5 * r * r : k * (a - 0.5 * k);
-}
-
 std::optional<PatternPoint> makePatternPoint(const Camera& cam, const ImageLevel& img,
                                              const Eigen::Vector2d& uv, const PhotometricSettings& settings) {
   PatternPoint p;

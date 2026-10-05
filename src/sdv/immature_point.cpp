@@ -54,12 +54,12 @@ bool ImmaturePoint::localWarp(const Camera& cam, double rho, const Sophus::SE3d&
   return true;
 }
 
-double ImmaturePoint::patternEnergy(const Eigen::Vector2d& uv, const Eigen::Matrix2d& warp, const ImageLevel& img,
-                                    const HostTargetState& state, double huber) const {
-  const double scale = state.brightnessScale();
+double ImmaturePoint::patternEnergy(const Eigen::Vector2d& uv,
+                                    const std::array<Eigen::Vector2d, kPatternSize>& offsets, const ImageLevel& img,
+                                    const HostTargetState& state, double scale, double huber) const {
   double e = 0;
   for (int k = 0; k < kPatternSize; ++k) {
-    const Eigen::Vector2d q = uv + warp * Eigen::Vector2d(kPattern[k][0], kPattern[k][1]);
+    const Eigen::Vector2d q = uv + offsets[k];
     if (q.x() < 1 || q.y() < 1 || q.x() > img.width - 3 || q.y() > img.height - 3)
       return std::numeric_limits<double>::infinity();
     const double r = (img.interpolateIntensity(float(q.x()), float(q.y())) - state.target.b) -
@@ -99,6 +99,8 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
   Eigen::Matrix2d A;
   const double rhoGuess = m_numGood > 0 ? std::clamp(m_rho, rMin, rMax) : 0.5 * (rMin + rMax);
   if (!localWarp(cam, rhoGuess, T, A)) return finish(TraceStatus::OutOfBounds);
+  std::array<Eigen::Vector2d, kPatternSize> offsets;
+  for (int k = 0; k < kPatternSize; ++k) offsets[k] = A * Eigen::Vector2d(kPattern[k][0], kPattern[k][1]);
 
   struct Sample {
     double rho;
@@ -108,14 +110,20 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
   };
   thread_local std::vector<Sample> samples;  // reused: traces run millions of times per frame in the densify
   samples.clear();
+  const double scale = state.brightnessScale();
+  // projectBearing, with the bearing rotated once.
+  const Eigen::Vector3d Rb = T.so3() * m_bearing;
+  const Eigen::Vector3d& t = T.translation();
   const double step = std::max(settings.stepPixels, length / settings.maxSamples);
   for (double rho = rMin; rho <= rMax && samples.size() <= size_t(settings.maxSamples) * 2;) {
-    Eigen::Vector2d uv, dRho;
-    if (!projectBearing(m_bearing, rho, T, cam, uv, nullptr, &dRho)) break;
+    Eigen::Vector2d uv;
+    Eigen::Matrix<double, 2, 3> J;
+    if (!cam.project(Eigen::Vector3d(Rb + rho * t), uv, J)) break;
+    const Eigen::Vector2d dRho = J * t;
     const double speed = dRho.norm();
     if (speed < 1e-9) break;
     const double rhoStep = step / speed;
-    if (cam.isInside(uv.x(), uv.y(), border)) samples.push_back({rho, uv, patternEnergy(uv, A, img, state, huber), rhoStep});
+    if (cam.isInside(uv.x(), uv.y(), border)) samples.push_back({rho, uv, patternEnergy(uv, offsets, img, state, scale, huber), rhoStep});
     rho += rhoStep;
   }
   if (samples.empty()) return finish(TraceStatus::OutOfBounds);
@@ -127,13 +135,12 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
   for (const auto& s : samples)
     if ((s.uv - best.uv).norm() > settings.secondBestExclusionPixels) secondBest = std::min(secondBest, s.energy);
 
-  const double scale = state.brightnessScale();
   for (int it = 0; it < settings.refineIterations; ++it) {
     Eigen::Vector2d uv, dRho;
     if (!projectBearing(m_bearing, best.rho, T, cam, uv, nullptr, &dRho)) break;
     double H = 0, b = 0;
     for (int k = 0; k < kPatternSize; ++k) {
-      const Eigen::Vector2d q = uv + A * Eigen::Vector2d(kPattern[k][0], kPattern[k][1]);
+      const Eigen::Vector2d q = uv + offsets[k];
       if (!cam.isInside(q.x(), q.y(), 1.0)) {
         H = 0;
         break;
@@ -150,7 +157,7 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
     const double rho = std::clamp(best.rho + delta, rMin, rMax);
     Eigen::Vector2d uvNew;
     if (!projectBearing(m_bearing, rho, T, cam, uvNew) || !cam.isInside(uvNew.x(), uvNew.y(), border)) break;
-    const double e = patternEnergy(uvNew, A, img, state, huber);
+    const double e = patternEnergy(uvNew, offsets, img, state, scale, huber);
     if (e >= best.energy) break;
     best = {rho, uvNew, e, best.rhoStep};
   }
