@@ -233,3 +233,41 @@ TEST(PhotometricBA, BlocksMatchTheJointAdjustment) {
   }
   ASSERT_EQ(blocks.pointDepthSigma.size(), joint.pointDepthSigma.size());
 }
+
+// Our Levenberg-Marquardt reaches Ceres' solution, jointly and in blocks (same residuals, robust loss, gauge).
+TEST(PhotometricBA, CustomOptimizerMatchesCeres) {
+  const sdv::Rig rig = surroundRig();
+  std::mt19937 rng(7);
+  const SyntheticRun run = renderRun(rig, rng, 12);
+  std::normal_distribution<double> noise(0.0, 1.0);
+  std::vector<Sophus::SE3d> initial = run.truth;
+  for (size_t k = 1; k < initial.size(); ++k)
+    initial[k] = initial[k] * Sophus::SE3d::exp((Sophus::Vector6d() << 0.01 * noise(rng), 0.01 * noise(rng),
+                                                 0.01 * noise(rng), 0.002 * noise(rng), 0.002 * noise(rng),
+                                                 0.002 * noise(rng)).finished());
+  using Optimizer = sdv::PhotometricBASettings::Optimizer;
+  for (const int blockKeyframes : {0, 4}) {
+    sdv::PhotometricBASettings settings;
+    settings.maxInitialPixelError = 40.0;
+    settings.blockKeyframes = blockKeyframes;
+    settings.blockCoarseResiduals = 30000;
+    settings.optimizer = Optimizer::Ceres;
+    const auto ceres = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
+    settings.optimizer = Optimizer::Custom;
+    const auto custom = sdv::photometricBundleAdjust(rig, run.records, run.images, initial, {}, settings);
+    EXPECT_NEAR(custom.rmseAfter, ceres.rmseAfter, 0.01 * ceres.rmseAfter) << "blocks " << blockKeyframes;
+    EXPECT_NEAR(static_cast<double>(custom.residuals), static_cast<double>(ceres.residuals), 0.01 * ceres.residuals);
+    for (size_t k = 0; k < run.truth.size(); ++k) {
+      const Sophus::SE3d d = custom.T_w_b[k] * ceres.T_w_b[k].inverse();
+      EXPECT_LT(d.translation().norm(), 3e-4) << "blocks " << blockKeyframes << " keyframe " << k;
+      EXPECT_LT(d.so3().log().norm(), 5e-5) << "blocks " << blockKeyframes << " keyframe " << k;
+      const Sophus::SE3d err = custom.T_w_b[k] * run.truth[k].inverse();
+      EXPECT_LT(err.translation().norm(), 0.002) << "keyframe " << k;
+    }
+    for (size_t k = 0; k < run.truth.size(); ++k)
+      for (int c = 0; c < rig.size(); ++c) {
+        EXPECT_NEAR(custom.affine[k][c].a, ceres.affine[k][c].a, 2e-3);
+        EXPECT_NEAR(custom.affine[k][c].b, ceres.affine[k][c].b, 0.2);
+      }
+  }
+}

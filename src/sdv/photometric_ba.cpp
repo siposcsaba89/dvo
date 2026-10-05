@@ -20,6 +20,7 @@
 
 #include <sdv/image_pyramid.h>
 #include <sdv/photometric_ba_cost.h>
+#include <sdv/photometric_ba_solver.h>
 
 namespace sdv {
 
@@ -54,7 +55,10 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     for (int c = 0; c < nc; ++c) {
       const size_t i = static_cast<size_t>(k) * nc + c;
       const cv::Mat floatGray = toFloatGray(images[k][c]);
-      floatGray.convertTo(gray[i], CV_8U);
+      if (images[k][c].type() == CV_8UC1)
+        gray[i] = images[k][c];  // shared, not copied: long runs hold ~10 GB of keyframe images
+      else
+        floatGray.convertTo(gray[i], CV_8U);
       grids[i] = std::make_unique<Grid>(gray[i].ptr<std::uint8_t>(), 0, gray[i].rows, 0, gray[i].cols);
       interpolators[i] = std::make_unique<Interpolator>(*grids[i]);
       const ImagePyramid pyr(floatGray, 1);
@@ -245,7 +249,29 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
   std::vector<double> depthInformation(points.size(), 0.0);
   std::map<std::tuple<int, int, bool>, std::array<double, 3>> pairs;  // count, squared before, squared after
 
-  if (settings.blockKeyframes > 0 && settings.blockKeyframes < nk) {
+  const bool custom = settings.optimizer == PhotometricBASettings::Optimizer::Custom && !extrinsicCosts;
+  const bool useBlocks = settings.blockKeyframes > 0 && settings.blockKeyframes < nk;
+  std::vector<const Interpolator*> imagePtrs(interpolators.size());
+  for (size_t i = 0; i < interpolators.size(); ++i) imagePtrs[i] = interpolators[i].get();
+  pba::SolverOptions solverOptions;
+  solverOptions.iterations = settings.iterations;
+  auto solverProblem = [&] {
+    pba::SolverProblem sp;
+    sp.rig = &rig, sp.points = &points, sp.images = &imagePtrs, sp.poses = &poses, sp.affine = &affine, sp.rho = &rho;
+    sp.huber = settings.huber * std::sqrt(static_cast<double>(kPatternSize));
+    return sp;
+  };
+  auto addOdometry = [&](pba::SolverProblem& sp, int k) {
+    if (settings.odometrySigmaFactor > 0) sp.odometry.push_back({k, std::shared_ptr<const pba::RelativePoseCost>(odometryCost(k))});
+  };
+  auto solverTiming = [](const pba::SolverSummary& sm) {
+    return fmt::format("{:.1f} s: structure {:.1f}, linearize {:.1f}, factorize {:.1f}, evaluate {:.1f}; {} iterations "
+                       "({} accepted), reduced system {}",
+                       sm.total, sm.structure, sm.linearize, sm.factorize, sm.evaluate, sm.iterations, sm.accepted,
+                       sm.reducedSize);
+  };
+
+  if (useBlocks || custom) {
     // Block-coordinate descent for bounded memory: one problem per block of consecutive keyframes, with its poses and
     // affine brightness, the inverse depths of the points it hosts with all their residuals, and the residuals of
     // outside points into it; everything outside the block stays fixed. Block borders shift by half a block between
@@ -291,7 +317,19 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
     // blocks then refine locally with all points.
     const size_t m = std::max<size_t>(1, (cands.size() + settings.blockCoarseResiduals - 1) /
                                              std::max<size_t>(1, settings.blockCoarseResiduals));
-    {
+    if (useBlocks && custom) {
+      pba::SolverProblem sp = solverProblem();
+      for (const Candidate& cd : cands)
+        if (cd.point % m == 0) sp.observations.push_back({cd.point, cd.target, cd.cam});
+      sp.poseFree.assign(nk, 1), sp.poseFree[0] = 0;
+      sp.affineFree.assign(static_cast<size_t>(nk) * nc, 0);  // as below: brightness refined by the blocks
+      sp.rhoFree.assign(points.size(), 1);
+      for (int k = 0; k + 1 < nk; ++k) addOdometry(sp, k);
+      const pba::SolverSummary sm = pba::solve(sp, solverOptions);
+      result.iterations += sm.iterations;
+      spdlog::info("photometric BA coarse: all {} keyframes, every {}. point, {} residuals, cost {:.4g} -> {:.4g}, {}", nk,
+                   m, sp.observations.size(), sm.initialCost, sm.finalCost, solverTiming(sm));
+    } else if (useBlocks) {
       ceres::Problem problem(problemOptions);
       for (auto& p : poses) problem.AddParameterBlock(p.data(), 7, new pba::SE3TangentManifold());
       size_t added = 0;
@@ -318,13 +356,38 @@ PhotometricBAResult photometricBundleAdjust(const Rig& rig, const std::vector<Ke
                    m, added, summary.initial_cost, summary.final_cost, timing(summary));
     }
 
-    const int n = settings.blockKeyframes;
+    const int n = useBlocks ? settings.blockKeyframes : nk;
     for (int round = 0; round < settings.rounds; ++round) {
-      for (int sweep = 0; sweep < settings.blockSweeps; ++sweep) {
+      for (int sweep = 0; sweep < (useBlocks ? settings.blockSweeps : 1); ++sweep) {
         std::vector<std::pair<int, int>> ranges;
         for (int b = 0, e = sweep % 2 ? n / 2 : n; b < nk; b = e, e += n) ranges.emplace_back(b, std::min(e, nk));
         for (const auto& [b, e] : ranges) {
           auto inside = [&, b = b, e = e](int k) { return k >= b && k < e; };
+          if (custom) {
+            pba::SolverProblem sp = solverProblem();
+            auto add = [&](std::uint32_t i) {
+              if (alive[i]) sp.observations.push_back({cands[i].point, cands[i].target, cands[i].cam});
+            };
+            for (int k = b; k < e; ++k) {
+              for (std::uint32_t i : byHost[k]) add(i);
+              for (std::uint32_t i : byTarget[k])
+                if (!inside(points[cands[i].point].host)) add(i);
+            }
+            sp.poseFree.assign(nk, 0), sp.affineFree.assign(static_cast<size_t>(nk) * nc, 0);
+            sp.rhoFree.assign(points.size(), 0);
+            for (int k = b; k < e; ++k) {
+              sp.poseFree[k] = k != 0;
+              for (int c = 0; c < nc; ++c) sp.affineFree[static_cast<size_t>(k) * nc + c] = !(k == 0 && c == 0);
+              for (std::uint32_t i : byHost[k]) sp.rhoFree[cands[i].point] = 1;
+            }
+            for (int k = std::max(0, b - 1); k < e && k + 1 < nk; ++k) addOdometry(sp, k);
+            const pba::SolverSummary sm = pba::solve(sp, solverOptions);
+            result.iterations += sm.iterations;
+            spdlog::info("photometric BA round {} sweep {}: keyframes {}..{}, {} residuals, cost {:.4g} -> {:.4g}, {}",
+                         round + 1, sweep + 1, b, e - 1, sp.observations.size(), sm.initialCost, sm.finalCost,
+                         solverTiming(sm));
+            continue;
+          }
           ceres::Problem problem(problemOptions);
           for (int k = b; k < e; ++k) problem.AddParameterBlock(poses[k].data(), 7, new pba::SE3TangentManifold());
           std::vector<double*> fixed;

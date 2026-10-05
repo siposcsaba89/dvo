@@ -43,6 +43,10 @@ struct PhotometricBASettings {
   // iterative Schur (conjugate gradients, Schur-Jacobi preconditioner, multi-threaded, for large problems).
   enum class Solver { SparseAmd, SparseNesdis, Iterative };
   Solver solver = Solver::SparseAmd;  // before the blocks: one joint solve with every m-th point within this
+  // Custom: our Levenberg-Marquardt (photometric_ba_solver.h; no per-residual storage). Ceres: the reference, and always
+  // with refineExtrinsics / refineIntrinsics; `solver` applies to it only.
+  enum class Optimizer { Custom, Ceres };
+  Optimizer optimizer = Optimizer::Custom;
   int iterations = 30;
   PhotometricSettings photometric;
   // Optional: also refine the rig extrinsics T_c_b (one per camera, shared by all keyframes; camera 0 stays fixed as

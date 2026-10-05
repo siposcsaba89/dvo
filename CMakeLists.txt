@@ -72,6 +72,8 @@ add_library(sdv STATIC
   src/sdv/photometric_ba.cpp
   src/sdv/photometric_ba_cost.h
   src/sdv/photometric_ba_cost.cpp
+  src/sdv/photometric_ba_solver.h
+  src/sdv/photometric_ba_solver.cpp
   src/sdv/photometric.h
   src/sdv/photometric.cpp
   src/sdv/point_filter.h

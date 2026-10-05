@@ -503,4 +503,96 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   4.6 M residuals, ~9 instead of ~16 GB); the rig stage reuses `rig_refine/keyframes.kfr` if present. Chili, 6 cameras
   (`results/chili_6cam`, up to the odometry + detect_loops): loop drift median 0.03 m, max 0.15 m (4 cameras, old
   settings: 0.45 / 1.55 m).
+- 2026-10-01: running: full Chili trajectory with 6 GS cameras (F_MIDRANGECAM_C included, its rig now refined),
+  `results/chili_6cam/run_gs_dense.sh` (after the loops stage; `.done_dense_<stage>` markers, resumable): export
+  every 0.1 m with `rig/rig_refined.yaml` (~4400 frames x 6), single-image DA3-Large and the `sub_s1b` alignment
+  (single-image is ~8x faster than multi-view and only 0.2 dB behind on the subset), fuse, TSDF, weighted mono,
+  the `sub_s1b` training with the schedule scaled by passes (60 k steps per 2036 images, ~730 k steps), balanced
+  3 m; test on every 16th exported frame (all cameras). On a GPU out-of-memory the run resumes from the newest
+  checkpoint with 1.5x `grow_grad2d`. Outputs in `gs_dense/` (`eval.txt`, `renders`, `depth`, fly-by).
+  Export: 26502 images, 6.16 M points; DA3 15 min per camera; alignment: all 6 host cameras found, 996 of 1005 weak
+  images fitted by the neighbour pass, 14 dropped; TSDF 5.98 M own + 6.58 M fill points. The first attempt died at
+  02:34 in the weighted mono: the WSL disk (`E:\vms\wsl\tumbleweed\ext4.vhdx`, 468 GB) had filled E: although `df /`
+  showed ~500 GB free (the vhdx does not shrink when files are deleted). Every per-image folder of this run is
+  ~26 GB: the script now writes no visualisations, deletes the raw / aligned / fused / TSDF depth once consumed, keeps
+  the 2 newest checkpoints and stops training below 15 GB free on E: or /. The files written before the crash were
+  all checked (load, PNG/JPEG end markers): none truncated.
+  Stopped before training: the TSDF cloud had walls in the wrong place (the KIJÁRAT wall turned across the ramp, a
+  wall over the floor on a lower level); the depth-fused cloud `colmap_fused/fused.ply` did not (its fill passes the
+  multi-view check; the TSDF integrates every depth map). Not the poses: the chained neighbour pass (fitted images
+  become references) drifts along bare walls. Ramp test (`ramp_test`, frames 930-1160, aligned depth / fused cloud,
+  z-buffered): chained F_CTCAM_R 964-986 0.61 -> 0.13 (a wall at 1/8 of its distance), 988-998 1.65-2.11,
+  M_NEIGHBORLANECAM_R 1052-1058 0.16-0.26; without chaining 0.60-1.17; own camera only (`--neighbour_same_only`):
+  those images get no depth. `align_depth.py`: `--neighbour_chain` (the old behaviour, now off by default),
+  `--neighbour_same_only`. New chain `run_gs_fused.sh` (after `run_da3.sh`, the raw DA3 depth was deleted): no
+  chaining, own camera only, unverified images without depth, fuse, then training on the fused cloud with the
+  per-image fused depth (confidence >= 0.6), no TSDF. Kept for comparison: `fused_v1_chained.ply` (clean),
+  `tsdf_v1_ghosts.ply`. `mono_depth_mv.py --vis_every N` (previews of every n-th frame, 0: none; the run writes
+  none) and `--no_conf`; the DA3 confidence (`colmap/mono_s1_conf`) is kept for sky masks.
+  TensorRT for single-image DA3: `da3_trt_export.py` (ONNX of image -> depth, conf; ONNX has no `cartesian_prod`, the
+  RoPE grid is built with meshgrid for the export), `trtexec --fp16` (TensorRT 10.14 in
+  `/home/csaba/tools/TensorRT-10.14.1.48`, its Python wheel installed in the depth-anything-3 env), `mono_depth_mv.py
+  --trt ENGINE` (needs `LD_LIBRARY_PATH=<TensorRT>/lib`; the engine has a fixed input size, 952x532 for 960x540 images
+  at `--process_res 952`; `results/engines/da3l_fp16_952x532.engine`). DA3-Large on the RTX 5060 Ti: 19 images/s
+  instead of 4.8 (PyTorch bf16; batching 4 images gains only 12 %); depth vs PyTorch: per-image median 0.28 %, worst
+  image 2.4 % (a scale the alignment absorbs), confidence 0.8 %. The Chili 6-camera redo runs on it. With `--trt`
+  the PyTorch weights are not loaded (only DA3's preprocessing) and every image runs on its own, so all cameras go in
+  one call (`--window 0` without `--cameras`): ~4 s start-up once instead of ~9 s per camera.
+  `fuse_depth.py` reads the next images' files in 2 background threads (both passes): identical output, ramp set
+  177 -> 154 s. The GPU stays at ~60 % because each image's work is many small GPU steps with CPU syncs in between,
+  not the disk; two processes would need pass 1 split by images and its fill candidates merged before pass 2.
 
+- 2026-10-02: `tsdf_fuse.py --snap D`: own points within D of the TSDF surface are replaced by it (one layer on
+  floors and walls); `--verify PLY` (`--verify_tol`, `--verify_footprint`): only depth pixels that agree with the
+  multi-view checked cloud of `fuse_depth.py` (z-buffer of its points) are integrated. Without it the TSDF took every
+  confident pixel of every image and built walls that the fuse check had rejected (ramp, lower levels); with it the
+  TSDF can only merge what the check kept. Ramp, frames 1000-1200: fill > 0.3 m from the checked cloud 5.0 % -> 0.6 %,
+  64 % of the confident pixels integrated, passes 1 and 2 ~1.8x slower (one extra projection per image).
+- 2026-10-02: `consistent_depth.py` (new, after fuse): depth maps that agree with each other instead of each being
+  fitted to the odometry points on its own. Per image a log-scale field (12x7 cells, bilinear); under the known poses
+  a depth sample of image i lands in a neighbour j at a known pixel and must match j's scaled depth there. Scaling
+  both does not help (fixed baseline), so the poses fix the metric scale; trusted odometry points only anchor it.
+  No matching, no triangulation (plain floors count), robust (Tukey 6 %, pairs with median > 8 % out), all images in
+  one problem. Neighbours: same camera +-15 frames, other cameras +-3, >= 10 % overlap. Then per pixel: kept if >= 2
+  independent views (another camera, or >= 5 frames away: consecutive frames are 19 cm apart and share the DA3
+  error) agree within 1.5 % at the exact landing point (a 3x3 search let grazing car sides agree with some sample)
+  and no neighbour sees through it; depth edges (second difference of inverse depth > 2 %, grown 13 px) never count.
+  The fuse confidence is not used: it measures odometry support, which plain floors and walls lack (they were holes).
+  Ramp (frames 1000-1200, 6 cameras): disagreement between images median 1.65 -> 0.44 %, 90 % 6.97 -> 2.69 %;
+  vs the odometry points 1.69 -> 0.81 %. Remaining: steps inside one image's DA3 depth (e.g. ramp floor) no scale
+  field can remove; the TSDF of the confirmed pixels only (`tsdf_fuse.py --surface_only`: points3D = surface alone,
+  no own points) gave one clean surface there. Pipeline: results/chili_6cam/run_gs_cons.sh (targets: the surface
+  raycast; later variants: the confirmed points as initial points, depth_cons as targets).
+  `tsdf_fuse.py --verify`/`snap_cloud.py` (checked cloud as a gate / snapping it onto the surface) were steps on the
+  way: the TSDF still built surfaces near the checked one from roughly agreeing pixels.
+- 2026-10-03: run_gs_cons.sh result (Chili full trajectory, 6 cameras, 24,846 training images, 732k steps): test
+  PSNR 31.25 (1656 images). Speckle in views farther from the training views (e.g. B_MIDRANGECAM_C/003994): 40 % of
+  the 5.4 M Gaussians had collapsed to points (largest axis < 1 mm, most < 1 um, opacity ~1). Sub-pixel in the
+  training views, so nothing removed them; the rasterizer's 0.3 px dilation draws each as a dot elsewhere.
+  `carve_gaussians.py --no_free --min_size 0.001` removes them (and opacity < 0.005): 5.40 -> 1.51 M Gaussians, test
+  PSNR 31.25 -> 31.67, every camera and segment better, speckle gone. Free-space carving against depth_cons (confirmed
+  pixels, z < 0.95 D - 0.1 m in >= 3 views) instead cost 2.4 dB: it also removed real-sized Gaussians. Under WSL a
+  full GPU shows up as "CUDA driver error: device not ready" (dmesg: dxgkio_make_resident -12); run_gs_cons.sh now
+  treats it as out of memory (grow_grad2d x 1.5 from the last checkpoint, checkpoints every 10 k steps).
+  20 k more steps from the filtered model (same settings, no densification, gs_cons/finetune): 31.67 -> 31.76, only
+  0.1 % collapsed again in that time. Small gain; the real fix belongs in training (`--antialiased`: sub-pixel
+  Gaussians lose opacity, so points cannot act as opaque dots; prune Gaussians < 1 mm while densifying).
+- 2026-10-04: `simple_trainer.py --prune_min_size_m M` (strategy.prune_min_size): prune Gaussians below M metres
+  while densifying. Checkpoints store `rasterize_mode` ("antialiased" with `--antialiased`); eval_names,
+  render_names, render_depth, render_flyby and carve_gaussians use it (older checkpoints: classic). DA3 confidence
+  of chili_6cam now 8-bit PNG (`colmap/mono_s1_conf_png`, conf = 1 + png / 50). Running:
+  results/chili_6cam/run_gs_cons2.sh (outputs gs_cons2/): depth_cons targets on confirmed pixels, `--antialiased`,
+  `--prune_min_size_m 0.001`, collapsed Gaussians removed at the end; same TSDF surface start and schedule as run 1.
+- 2026-10-05: photometric BA on our own Levenberg-Marquardt (`src/sdv/photometric_ba_solver.*`, `close_loops
+  --pba-optimizer custom`, the default; `ceres` stays as the reference and for the rig stage, which refines the
+  calibration): the residuals and analytic Jacobians of `TemporalCost` / `StaticCost` go straight into the normal
+  equations per point, the inverse depth is eliminated, the reduced system over keyframe poses and brightness is
+  solved by Eigen's sparse LDLT; Ceres' LM strategy and Huber weighting, so the costs match. Nothing per residual is
+  stored. Zion garage (6 cameras, 260 keyframes, 3.2 M residuals): blocks of 100 93 s / 1.8 GB (Ceres 372 s /
+  5.2 GB), joint 165 s / 2.2 GB (Ceres 172 s / 9.9 GB, the joint solve is dominated by factorising the nearly dense
+  reduced system); poses within 0.04 mm (blocks) and 0.01 mm (joint) of Ceres', same rmse. close_loops keeps the
+  keyframe images in grey (the point colours are decoded again one frame at a time), and the BA shares 8-bit grey
+  input instead of copying it. `voxelnet 20260401T105922Z` (Zion, 16123 frames, 1222 m, 6 cameras, 2519 keyframes,
+  28 M candidate residuals): Ceres ran out of memory twice (process ~29 GB; Windows' commit limit is RAM + a 4 GB
+  pagefile, and a Windows process took 14.6 GB more); custom: 14.7 GB peak in the BA, coarse solve 36 s (Ceres 71 s,
+  same cost), blocks 13-26 s (Ceres 49-78 s).

@@ -119,6 +119,39 @@ std::array<std::uint8_t, 3> rgbAt(const cv::Mat& image, const Eigen::Vector2d& u
   return {g, g, g};
 }
 
+// Colours at the points' host pixels, decoded one frame at a time (the keyframe images of a long run are held in
+// grey: colour would triple their memory).
+std::vector<std::array<std::uint8_t, 3>> pointColours(const std::string& rigFile, const std::vector<std::string>& names,
+                                                      const std::vector<std::string>& runNames,
+                                                      const std::vector<sdv::Camera>& cameras,
+                                                      const std::vector<sdv::KeyframeRecord>& records, double scale,
+                                                      int start, int stride, const sdv::PhotometricBAResult& pba) {
+  const sdv::RigConfig config = sdv::loadRigConfig(rigFile);
+  std::vector<sdv::RigStream> streams = sdv::openRigStreams(config, names, runNames);
+  std::vector<std::vector<std::vector<size_t>>> byHost(streams.size(), std::vector<std::vector<size_t>>(records.size()));
+  for (size_t i = 0; i < pba.points.size(); ++i) {
+    const auto [k, c] = pba.pointHost[i];
+    byHost[c][k].push_back(i);
+  }
+  std::vector<std::array<std::uint8_t, 3>> rgb(pba.points.size());
+  for (size_t c = 0; c < streams.size(); ++c) {
+    sdv::FrameSource& source = *streams[c].source;
+    long long position = 0;
+    for (size_t k = 0; k < records.size(); ++k) {
+      if (byHost[c][k].empty()) continue;
+      const long long wanted = start + static_cast<long long>(records[k].frameIndex) * stride;
+      for (; position < wanted; ++position)
+        if (!source.skip()) throw std::runtime_error("input of " + streams[c].config->name + " ended early");
+      const cv::Mat input = source.next();
+      ++position;
+      if (input.empty()) throw std::runtime_error("input of " + streams[c].config->name + " ended early");
+      const cv::Mat image = sdv::prepareImage(input, scale, cameras[c]);
+      for (const size_t i : byHost[c][k]) rgb[i] = rgbAt(image, pba.pointUv[i]);
+    }
+  }
+  return rgb;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -138,7 +171,7 @@ int main(int argc, char** argv) {
   sdv::PoseGraphSettings graphSettings;
   sdv::GlobalBASettings baSettings;
   sdv::PhotometricBASettings pbaSettings;
-  std::string pbaSolver;
+  std::string pbaSolver, pbaOptimizer;
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -185,6 +218,9 @@ int main(int argc, char** argv) {
        "0 = one joint problem)")
       ("pba-block-sweeps", po::value(&pbaSettings.blockSweeps)->default_value(pbaSettings.blockSweeps),
        "sweeps over the blocks per round, borders shifted by half a block")
+      ("pba-optimizer", po::value(&pbaOptimizer)->default_value("custom"),
+       "photometric BA optimizer: custom (ours, no per-residual storage) or ceres (the reference; always with "
+       "--pba-extrinsics / --pba-intrinsics)")
       ("pba-solver", po::value(&pbaSolver)->default_value("sparse"),
        "photometric BA linear solver: sparse (Eigen Cholesky, AMD), nesdis (nested dissection), iterative (CG, "
        "multi-threaded)")
@@ -280,6 +316,9 @@ int main(int argc, char** argv) {
     refineIntrinsics = vm.count("pba-intrinsics") > 0;
     if (up.size() != 3) throw po::error("--up takes 3 values");
     using Solver = sdv::PhotometricBASettings::Solver;
+    if (pbaOptimizer == "custom") pbaSettings.optimizer = sdv::PhotometricBASettings::Optimizer::Custom;
+    else if (pbaOptimizer == "ceres") pbaSettings.optimizer = sdv::PhotometricBASettings::Optimizer::Ceres;
+    else throw po::error("--pba-optimizer: custom or ceres");
     if (pbaSolver == "sparse") pbaSettings.solver = Solver::SparseAmd;
     else if (pbaSolver == "nesdis") pbaSettings.solver = Solver::SparseNesdis;
     else if (pbaSolver == "iterative") pbaSettings.solver = Solver::Iterative;
@@ -344,6 +383,7 @@ int main(int argc, char** argv) {
     std::vector<Sophus::SE3d> beforePhotometric = after;
     sdv::PhotometricBAResult pba;
     std::vector<std::vector<cv::Mat>> images;
+    bool colourFromVideo = false;
     if (photometric || (densify && !plyFile.empty())) {
       if (rigFile.empty() == sequenceDir.empty())
         throw std::invalid_argument("--photometric and --densify need --rig or --sequence");
@@ -359,7 +399,8 @@ int main(int argc, char** argv) {
         }
       } else {
         attachMasks(rigFile, rigCameras, rig, scale);
-        images = loadKeyframeImages(rigFile, cameraNames, cameraNames, rig.cameras, records, scale, start, stride);
+        images = loadKeyframeImages(rigFile, cameraNames, cameraNames, rig.cameras, records, scale, start, stride, true);
+        colourFromVideo = true;
       }
     }
     if (photometric) {
@@ -472,6 +513,9 @@ int main(int argc, char** argv) {
       std::vector<sdv::MapPoint> cloud;
       if (photometric && !pba.points.empty()) {
         // As in run_vo: distance limit (points near infinity), residuals left, depth uncertainty, isolated points.
+        std::vector<std::array<std::uint8_t, 3>> videoRgb;
+        if (colourFromVideo)
+          videoRgb = pointColours(rigFile, cameraNames, cameraNames, rig.cameras, records, scale, start, stride, pba);
         std::vector<double> d = pba.pointDistance;
         std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
         const double limit = maxDistanceFactor * d[d.size() / 2];
@@ -486,7 +530,7 @@ int main(int argc, char** argv) {
           if (pba.pointDistance[i] <= limit && pba.pointResiduals[i] >= minResiduals &&
               (maxDepthSigma <= 0 || pba.pointDepthSigma[i] <= maxDepthSigma)) {
             const auto [k, c] = pba.pointHost[i];
-            const auto rgb = rgbAt(images[k][c], pba.pointUv[i]);
+            const auto rgb = colourFromVideo ? videoRgb[i] : rgbAt(images[k][c], pba.pointUv[i]);
             cloud.push_back({pba.points[i], static_cast<float>(rgb[1]), records[k].frameIndex, c, pba.pointUv[i],
                              pba.pointDistance[i], pba.pointResiduals[i], pba.pointDepthSigma[i],
                              sdv::MapPointSource::Active, rgb});
