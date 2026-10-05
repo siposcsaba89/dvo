@@ -143,6 +143,13 @@ removes ~40 % of the points; not in the default `DENSIFY_ARGS` until a GS compar
 steps come from it (kept, >= 20 observations, sigma <= 0.004, an exported point within 3 cm). Check
 `detect_loops.log`: in multi-storey garages, loops between levels would show as large corrections.
 
+Egomotion for other tools (aiMotive `egomotion2.json`, keyed by record frame id, `RT_ECEF_body` = T_world_body in
+the run's local levelled frame, not geodetic; `time`/`time_host` = earliest camera exposure start, host clock, s):
+
+```bash
+$B/export_egomotion --rig $R/rig/rig.yaml --rig-cameras $VO --poses $R/diag/poses_loop.txt -o $R/egomotion2.json
+```
+
 ### 3. COLMAP export
 
 ```bash
@@ -610,3 +617,16 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   there). `close_loops` frees the keyframe images before densify (it streams its frames); `gs_pipeline.sh` adds
   B_MIDRANGECAM_C to `GS_CAMS` only when `VO_CAMS` lacks it (listed twice, close_loops stopped after the BA with
   "--densify-cameras: unknown camera", the first voxelnet run).
+- 2026-10-05: densify speed. Frames decoded camera-parallel by a background thread up to three frames ahead (the
+  serial decode was 42 % of the densify time), one tracing pass per frame over all open hosts, new hosts selected
+  in parallel per camera, a per-thread trace buffer: garage densify 358 s (6 cameras, byte-identical cloud; before
+  1082 s, measured next to another densify). Log line `densify time:` (waiting for frames, pyramids, traces, new
+  hosts, closing). Tests on the first 2000 garage frames (`--densify-max-frames`, 34 % standstill like the whole
+  run), `DENSIFY_ARGS` as the pipeline: base 253 s (traces 148 s), 3.063 M points, 414 k trusted; floaters
+  (cloud_consistency.py, per observation bin) 0.21-0.39 %. `--densify-drop-frames 5` (no good trace 5 frames
+  after the host: not traced further): traces -23 %, wall -13 %, points -1.6 %, trusted -1.5 %, floaters the same
+  (0.21-0.29 %); 10 frames: traces -14 %, points -0.6 %. `--densify-min-motion 0.05 --densify-min-rotation 0.5`
+  (frames between keyframes traced only after 5 cm / 0.5 deg): 37 % of the frames skipped but traces only -6 %
+  (standstill traces are cheap: the search line is too short), trusted -3.5 % (fewer observations): rejected.
+  Windows ran out of commit again (15:54): another session's training job (Windows python, 13.5 GB) next to
+  WSL's 29 GB with the 4 GB pagefile; the voxelnet densify died at frame 9400 of 16123.

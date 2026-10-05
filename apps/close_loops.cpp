@@ -227,6 +227,7 @@ int main(int argc, char** argv) {
   sdv::PhotometricBASettings pbaSettings;
   std::string pbaSolver, pbaOptimizer;
   double densifyMinMotion = 0, densifyMinRotationDeg = 0;
+  size_t densifyMaxFrames = 0;
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -327,6 +328,8 @@ int main(int argc, char** argv) {
        "candidate pixels per keyframe image")
       ("densify-frames", po::value(&dense.traceFrames)->default_value(dense.traceFrames),
        "following input frames each keyframe host is traced into")
+      ("densify-max-frames", po::value(&densifyMaxFrames)->default_value(densifyMaxFrames),
+       "> 0: densify only the first this many frames (tests)")
       ("densify-drop-frames", po::value(&dense.dropFrames)->default_value(dense.dropFrames),
        "> 0: candidates without a good trace this many frames after their host are not traced further")
       ("densify-min-motion", po::value(&densifyMinMotion)->default_value(densifyMinMotion),
@@ -726,7 +729,8 @@ int main(int argc, char** argv) {
         double decodeTime = 0;
         std::optional<Sophus::SE3d> lastTraced;
         size_t skippedFrames = 0;
-        for (size_t i = 0; i < poses.size(); ++i) {
+        const size_t densifyFrames = densifyMaxFrames > 0 ? std::min(densifyMaxFrames, poses.size()) : poses.size();
+        for (size_t i = 0; i < densifyFrames; ++i) {
           const auto td = std::chrono::steady_clock::now();
           const std::vector<cv::Mat> frame = nextFrame();
           decodeTime += std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count();
