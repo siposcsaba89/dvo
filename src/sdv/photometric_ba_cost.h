@@ -112,8 +112,7 @@ class StaticExtrinsicCost : public ceres::SizedCostFunction<kPatternSize, 7, 7, 
 
 // One of the extrinsic costs above with intrinsics blocks (fx, fy, cx, cy, alpha, beta) appended: the host pattern
 // bearings come from the host intrinsics, the projection uses the target intrinsics. Parameters: those of the inner
-// cost, then the host intrinsics and, for two different cameras, the target intrinsics. The inner Jacobians are
-// analytic, the intrinsics ones central differences.
+// cost, then the host intrinsics and, for two different cameras, the target intrinsics.
 enum class ExtrinsicCostKind { Temporal, TemporalSameCamera, Static };
 
 class CalibratedCost : public ceres::CostFunction {
@@ -123,8 +122,7 @@ class CalibratedCost : public ceres::CostFunction {
   bool Evaluate(const double* const* parameters, double* residuals, double** jacobians) const override;
 
  private:
-  bool evaluate(const double* const* parameters, const double* hostK, const double* targetK, double* residuals,
-                double** jacobians) const;
+  Sophus::SE3d relativePose(const double* const* parameters) const;
 
   ExtrinsicCostKind m_kind;
   const PointData* m_point;

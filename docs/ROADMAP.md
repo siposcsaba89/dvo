@@ -482,11 +482,20 @@ Chili 2026-09-22 (8512 frames, 625 m, multi-storey; autocalib), 6 cameras, `REFI
 RIG_POINTS=60` (at 120 points per image the rig BA had 4.6 M residuals, ~16 GB), `results/chili_6cam`: rig rotations
 <= 0.08 deg, centres 2-7 mm, F_MIDRANGECAM_C fine on this vehicle (residuals into it 6.3-6.5, as all pairs; BA rmse
 6.12). Odometry 1209 keyframes, 625.4 m (4 cameras with the old settings: 1357, 622.9 m); loops (detect_loops only):
-correction median 0.03 m, max 0.15 m (old: 0.45 / 1.55 m), 2093 loops. Loop closure, BA and densify not run yet.
+correction median 0.03 m, max 0.15 m (old: 0.45 / 1.55 m), 2093 loops. close_loops (blockwise BA, 200 keyframes,
+21.5 GB resident during densify, 1 h 17 min): pose graph cost 1151 -> 59 (old: 253723 -> 881), 1 loop rejected; BA 694 k points, 14.1 M
+residuals (4.8 M across loops), rmse 11.40 -> 6.37 (old: 568 k, 6.3 M / 1.8 M, 12.82 -> 5.96; twice the residuals,
+mostly cross-camera); every camera pair 5.4-8.0 after the BA, F_MIDRANGECAM_C as the others. Densify (6 cameras):
+44.2 M accepted, 27.6 M after the merge, free space removed 0.79 M (2.9 %), 26.75 M written (old, 4-camera odometry,
+no free-space filter: 26.77 M).
 
 Pipeline (`tools/gs_pipeline.sh`): `VO_ARGS` (`--trace-min-quality 3 --static-min-quality 3
 --point-min-good-fraction 0.5`), `DENSIFY_ARGS` (`--densify-min-quality 3
 --free-space`), `REFINE_RIG=1` (stage rig: rotations from the first `RIG_FRAMES` frames, then every stage with
 `rig/rig_refined.yaml`). Two tests fail on Linux/clang at HEAD as well (MonoInitializerTest.ForwardMotionWithYaw,
 WindowOptimizerTest.MarginalizationKeepsOptimumAndInformation, Pinhole variants): open.
+
+Intrinsics Jacobians of `pba::CalibratedCost` are analytic now (`Camera::projectIntrinsicsJacobian`,
+`Camera::unprojectIntrinsicsJacobian`: chain rule through the closed-form EUCM projection and inverse; tested against
+central differences) instead of 24 extra pattern evaluations per residual. BA timing on Zion still to do.
 

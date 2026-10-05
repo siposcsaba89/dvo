@@ -264,48 +264,61 @@ CalibratedCost::CalibratedCost(ExtrinsicCostKind kind, const PointData* point, c
   set_num_residuals(kPatternSize);
 }
 
-bool CalibratedCost::evaluate(const double* const* parameters, const double* hostK, const double* targetK,
-                              double* residuals, double** jacobians) const {
-  const Camera host = withIntrinsics(*m_hostCam, hostK), target = withIntrinsics(*m_targetCam, targetK);
-  PointData p = *m_point;
-  for (int k = 0; k < kPatternSize; ++k)
-    if (!host.unproject(Eigen::Vector2d(p.pattern.uv + Eigen::Vector2d(kPattern[k][0], kPattern[k][1])),
-                        p.pattern.bearings[k]))
-      return false;
+Sophus::SE3d CalibratedCost::relativePose(const double* const* parameters) const {
+  const auto T = [&](int i) { return Eigen::Map<const Sophus::SE3d>(parameters[i]); };
   switch (m_kind) {
-    case ExtrinsicCostKind::Temporal: return TemporalExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
-    case ExtrinsicCostKind::TemporalSameCamera:
-      return TemporalSameCameraExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
-    case ExtrinsicCostKind::Static: return StaticExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+    case ExtrinsicCostKind::Temporal: return T(3).inverse() * T(1).inverse() * T(0) * T(2);
+    case ExtrinsicCostKind::TemporalSameCamera: return T(2).inverse() * T(1).inverse() * T(0) * T(2);
+    case ExtrinsicCostKind::Static: return T(1).inverse() * T(0);
   }
-  return false;
+  return {};
 }
 
 bool CalibratedCost::Evaluate(const double* const* parameters, double* residuals, double** jacobians) const {
   const bool same = m_kind == ExtrinsicCostKind::TemporalSameCamera;
-  const double* hostK = parameters[m_inner];
-  const double* targetK = same ? hostK : parameters[m_inner + 1];
-  if (!evaluate(parameters, hostK, targetK, residuals, jacobians)) return false;
-  if (!jacobians) return true;
-  // Steps of about 0.01 px in the image.
-  static constexpr double kStep[6] = {1e-2, 1e-2, 1e-2, 1e-2, 1e-5, 1e-4};
-  const int blocks = same ? 1 : 2;
-  for (int b = 0; b < blocks; ++b) {
-    double* J = jacobians[m_inner + b];
-    if (!J) continue;
-    for (int j = 0; j < 6; ++j) {
-      std::array<double, 6> plus, minus;
-      std::copy_n(parameters[m_inner + b], 6, plus.data());
-      minus = plus;
-      plus[j] += kStep[j];
-      minus[j] -= kStep[j];
-      double rp[kPatternSize], rm[kPatternSize];
-      const bool ok = b == 0 ? evaluate(parameters, plus.data(), same ? plus.data() : targetK, rp, nullptr) &&
-                                   evaluate(parameters, minus.data(), same ? minus.data() : targetK, rm, nullptr)
-                             : evaluate(parameters, hostK, plus.data(), rp, nullptr) &&
-                                   evaluate(parameters, hostK, minus.data(), rm, nullptr);
-      for (int k = 0; k < kPatternSize; ++k) J[6 * k + j] = ok ? (rp[k] - rm[k]) / (2 * kStep[j]) : 0.0;
-    }
+  const Camera host = withIntrinsics(*m_hostCam, parameters[m_inner]);
+  const Camera target = same ? host : withIntrinsics(*m_targetCam, parameters[m_inner + 1]);
+  PointData p = *m_point;
+  std::array<Eigen::Matrix<double, 3, 6>, kPatternSize> dBdK;
+  for (int k = 0; k < kPatternSize; ++k)
+    if (!host.unprojectIntrinsicsJacobian(p.pattern.uv + Eigen::Vector2d(kPattern[k][0], kPattern[k][1]),
+                                          p.pattern.bearings[k], dBdK[k]))
+      return false;
+  bool ok = false;
+  switch (m_kind) {
+    case ExtrinsicCostKind::Temporal:
+      ok = TemporalExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+      break;
+    case ExtrinsicCostKind::TemporalSameCamera:
+      ok = TemporalSameCameraExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+      break;
+    case ExtrinsicCostKind::Static:
+      ok = StaticExtrinsicCost(&p, &target, m_image).Evaluate(parameters, residuals, jacobians);
+      break;
+  }
+  if (!ok || !jacobians) return ok;
+  double* Jh = jacobians[m_inner];
+  double* Jt = same ? nullptr : jacobians[m_inner + 1];
+  if (!Jh && !Jt) return true;
+  if (Jh) std::fill_n(Jh, kPatternSize * 6, 0.0);
+  if (Jt) std::fill_n(Jt, kPatternSize * 6, 0.0);
+  // r = s (I_t(uv(x)) - ...), x = R b(K_h) + rho t: dr/dK_t = s dI duv/dK_t, dr/dK_h = s dI duv/dx R db/dK_h.
+  const Sophus::SE3d T_t_h = relativePose(parameters);
+  const Eigen::Matrix3d R = T_t_h.rotationMatrix();
+  const double rho = parameters[m_inner - 3][0];
+  for (int k = 0; k < kPatternSize; ++k) {
+    const Eigen::Vector3d x = R * p.pattern.bearings[k] + rho * T_t_h.translation();
+    Eigen::Vector2d uv;
+    Eigen::Matrix<double, 2, 3> dUvdX;
+    Eigen::Matrix<double, 2, 6> dUvdK;
+    if (!target.project(x, uv, dUvdX) || !target.projectIntrinsicsJacobian(x, dUvdK)) continue;
+    double intensity, dIdRow, dIdCol;
+    m_image->Evaluate(uv.y(), uv.x(), &intensity, &dIdRow, &dIdCol);
+    const Eigen::RowVector2d g = std::sqrt(p.pattern.gradientWeights[k]) * Eigen::RowVector2d(dIdCol, dIdRow);
+    Eigen::Matrix<double, 1, 6> rowHost = g * dUvdX * R * dBdK[k];
+    if (same) rowHost += g * dUvdK;
+    else if (Jt) Eigen::Map<Eigen::Matrix<double, 1, 6>>(Jt + 6 * k) = g * dUvdK;
+    if (Jh) Eigen::Map<Eigen::Matrix<double, 1, 6>>(Jh + 6 * k) = rowHost;
   }
   return true;
 }

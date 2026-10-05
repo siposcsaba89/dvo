@@ -98,6 +98,50 @@ class Camera {
     return true;
   }
 
+  // d uv / d (fx, fy, cx, cy, alpha, beta) at the point p (Khomutenko et al.).
+  bool projectIntrinsicsJacobian(const Eigen::Vector3d& p, Eigen::Matrix<double, 2, 6>& J) const {
+    const double x = p.x(), y = p.y(), z = p.z(), r2 = x * x + y * y;
+    const double d = std::sqrt(beta * r2 + z * z);
+    const double den = alpha * d + (1.0 - alpha) * z;
+    if (!(z > -validityW() * d) || den <= 1e-9) return false;
+    const double mx = x / den, my = y / den;
+    const double dDenDAlpha = d - z, dDenDBeta = alpha * r2 / (2.0 * d);
+    J << mx, 0, 1, 0, -fx * mx / den * dDenDAlpha, -fx * mx / den * dDenDBeta,
+         0, my, 0, 1, -fy * my / den * dDenDAlpha, -fy * my / den * dDenDBeta;
+    return true;
+  }
+
+  // Unit-norm bearing of uv and its derivative with respect to (fx, fy, cx, cy, alpha, beta), the chain rule
+  // through the closed-form inverse.
+  bool unprojectIntrinsicsJacobian(const Eigen::Vector2d& uv, Eigen::Vector3d& bearing,
+                                   Eigen::Matrix<double, 3, 6>& J) const {
+    const double mx = (uv.x() - cx) / fx, my = (uv.y() - cy) / fy;
+    const double r2 = mx * mx + my * my;
+    const double k = beta * (2.0 * alpha - 1.0) * r2;
+    if (alpha > 0.5 && k >= 1.0) return false;
+    const double sq = std::sqrt(1.0 - k);
+    const double num = 1.0 - beta * alpha * alpha * r2, den = alpha * sq + (1.0 - alpha);
+    const double mz = num / den;
+    // mz(r2, alpha, beta) = num / den; dk enters den through sqrt(1 - k).
+    const auto dMz = [&](double dNum, double dK, double dDenDirect) {
+      return (dNum * den - num * (dDenDirect - alpha * dK / (2.0 * sq))) / (den * den);
+    };
+    const double dMzDr2 = dMz(-beta * alpha * alpha, beta * (2.0 * alpha - 1.0), 0.0);
+    Eigen::Matrix<double, 3, 6> dM = Eigen::Matrix<double, 3, 6>::Zero();
+    dM(0, 0) = -mx / fx;
+    dM(0, 2) = -1.0 / fx;
+    dM(1, 1) = -my / fy;
+    dM(1, 3) = -1.0 / fy;
+    for (int i = 0; i < 4; ++i) dM(2, i) = dMzDr2 * 2.0 * (mx * dM(0, i) + my * dM(1, i));
+    dM(2, 4) = dMz(-2.0 * beta * alpha * r2, 2.0 * beta * r2, sq - 1.0);
+    dM(2, 5) = dMz(-alpha * alpha * r2, (2.0 * alpha - 1.0) * r2, 0.0);
+    const Eigen::Vector3d m(mx, my, mz);
+    const double norm = m.norm();
+    bearing = m / norm;
+    J = (Eigen::Matrix3d::Identity() - bearing * bearing.transpose()) / norm * dM;
+    return true;
+  }
+
   bool isInside(double u, double v, double border) const {
     if (!(u >= border && v >= border && u < width - 1 - border && v < height - 1 - border)) return false;
     if (!mask) return true;

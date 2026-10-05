@@ -42,7 +42,50 @@ void checkJacobian(const sdv::Camera& cam, const Eigen::Vector3d& p) {
   }
 }
 
+sdv::Camera perturbed(const sdv::Camera& cam, int i, double h) {
+  sdv::Camera c = cam;
+  double* k[] = {&c.fx, &c.fy, &c.cx, &c.cy, &c.alpha, &c.beta};
+  *k[i] += h;
+  return c;
+}
+
+void checkIntrinsicsJacobians(const sdv::Camera& cam, const Eigen::Vector3d& p) {
+  Eigen::Matrix<double, 2, 6> J;
+  ASSERT_TRUE(cam.projectIntrinsicsJacobian(p, J));
+  Eigen::Vector2d uv;
+  ASSERT_TRUE(cam.project(p, uv));
+  Eigen::Vector3d bearing;
+  Eigen::Matrix<double, 3, 6> Jb;
+  ASSERT_TRUE(cam.unprojectIntrinsicsJacobian(uv, bearing, Jb));
+  EXPECT_LT((bearing - p.normalized()).norm(), 1e-9);
+  for (int i = 0; i < 6; ++i) {
+    const double h = i < 4 ? 1e-4 : 1e-7;
+    Eigen::Vector2d up, um;
+    ASSERT_TRUE(perturbed(cam, i, h).project(p, up));
+    ASSERT_TRUE(perturbed(cam, i, -h).project(p, um));
+    const Eigen::Vector2d num = (up - um) / (2 * h);
+    EXPECT_NEAR(J(0, i), num.x(), 1e-5 * (1 + std::abs(num.x()))) << "projection, parameter " << i;
+    EXPECT_NEAR(J(1, i), num.y(), 1e-5 * (1 + std::abs(num.y()))) << "projection, parameter " << i;
+    Eigen::Vector3d bp, bm;
+    ASSERT_TRUE(perturbed(cam, i, h).unproject(uv, bp));
+    ASSERT_TRUE(perturbed(cam, i, -h).unproject(uv, bm));
+    const Eigen::Vector3d numB = (bp - bm) / (2 * h);
+    for (int r = 0; r < 3; ++r)
+      EXPECT_NEAR(Jb(r, i), numB[r], 1e-6 * (1 + std::abs(numB[r]))) << "unprojection, parameter " << i;
+  }
+}
+
 }  // namespace
+
+TEST(Camera, IntrinsicsJacobians) {
+  for (const auto& p : {Eigen::Vector3d(0.3, -0.2, 2.0), Eigen::Vector3d(-4.0, 1.5, 3.0),
+                        Eigen::Vector3d(0.0, 0.0, 1.0)}) {
+    checkIntrinsicsJacobians(kPinhole, p);
+    checkIntrinsicsJacobians(kFisheye, p);
+    checkIntrinsicsJacobians(kPincushion, p);
+  }
+  checkIntrinsicsJacobians(kFisheye, Eigen::Vector3d(2.0, 0.5, -0.1));
+}
 
 TEST(Camera, PinholeRoundTrip) { checkRoundTrip(kPinhole); }
 TEST(Camera, FisheyeRoundTrip) { checkRoundTrip(kFisheye); }
