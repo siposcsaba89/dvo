@@ -53,8 +53,9 @@ void writeRig(const sdv::aimrec::Recording& rec, const fs::path& dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string recordDir, calibFile, outDir, rigDir;
+  std::string recordDir, calibFile, outDir, rigDir, decode = "auto";
   std::vector<std::string> labels;
+  std::vector<double> scales;
   std::size_t first = 0, count = 1, stride = 1;
   po::options_description desc("aimrec_extract options");
   desc.add_options()
@@ -67,6 +68,9 @@ int main(int argc, char** argv) {
       ("count", po::value(&count), "number of synced frames to write")
       ("stride", po::value(&stride), "synced frames between written frames")
       ("color", "write BGR instead of grey")
+      ("scales", po::value(&scales)->multitoken(), "resize the images by these factors in turn (INTER_AREA)")
+      ("decode", po::value(&decode), "decoding device: cpu, gpu or auto")
+      ("dry-run", "decode, but write no images (decoding speed)")
       ("rig-out", po::value(&rigDir), "write a run_vo rig (rig.yaml, camera YAMLs, masks) of the opened cameras here");
   po::variables_map vm;
   try {
@@ -83,6 +87,7 @@ int main(int argc, char** argv) {
   }
 
   try {
+    sdv::aimrec::setDecodeDevice(sdv::aimrec::parseDecodeDevice(decode));
     sdv::aimrec::Recording rec(recordDir, calibFile, labels);
     const auto& synced = rec.syncedFrameIds();
     spdlog::info("vehicle {}, {} cameras, {} synced frames", rec.vehicle(), rec.size(), synced.size());
@@ -104,15 +109,20 @@ int main(int argc, char** argv) {
         cv::imwrite((fs::path(outDir) / (rec.calibration(c).label + "_mask.png")).string(), rec.calibration(c).mask);
 
     const auto format = vm.count("color") ? sdv::aimrec::ImageFormat::Bgr : sdv::aimrec::ImageFormat::Gray;
-    for (std::size_t k = 0, i = first; k < count && i < synced.size(); ++k, i += stride) {
+    const bool write = !vm.count("dry-run");
+    const auto tAll = std::chrono::steady_clock::now();
+    std::size_t decoded = 0;
+    for (std::size_t k = 0, i = first; k < count && i < synced.size(); ++k, i += stride, ++decoded) {
       const auto t0 = std::chrono::steady_clock::now();
-      const std::vector<cv::Mat> images = rec.read(synced[i], format);
+      const std::vector<cv::Mat> images = rec.read(synced[i], format, scales);
       const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-      for (int c = 0; c < rec.size(); ++c)
+      for (int c = 0; c < rec.size() && write; ++c)
         cv::imwrite((fs::path(outDir) / fmt::format("{}_{:06}.png", rec.calibration(c).label, synced[i])).string(),
                     images[c]);
-      spdlog::info("frame id {} (t = {} ns): decoded in {:.1f} ms", synced[i], rec.timestampNs(synced[i]), ms);
+      if (write) spdlog::info("frame id {} (t = {} ns): decoded in {:.1f} ms", synced[i], rec.timestampNs(synced[i]), ms);
     }
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tAll).count();
+    spdlog::info("{} frames of {} cameras in {:.2f} s: {:.1f} frames/s", decoded, rec.size(), s, decoded / s);
   } catch (const std::exception& e) {
     spdlog::error("{}", e.what());
     return EXIT_FAILURE;

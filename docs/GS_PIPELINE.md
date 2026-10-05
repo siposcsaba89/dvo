@@ -26,6 +26,7 @@ and `STOP_AFTER=vo` or
 | What | Where / version |
 |---|---|
 | sdv (this repo) | `cmake --preset linux-clang && cmake --build --preset linux-release` → `build/linux/Release/` (clang, vcpkg `x64-linux-dynamic`) |
+| CUDA (optional) | CUDA 13.4 at `/usr/local/cuda` (nvcc, host compiler clang or gcc); found automatically, `-DSDV_CUDA=OFF` builds without. Enables NVDEC decoding (`--decode`, below); FFmpeg from vcpkg with `nvcodec` |
 | gsplat + our scripts | `/home/csaba/projects/gsplat` (gsplat 1.6.0, base commit `512d366b`) with our changes in `examples/` (below) |
 | Python env for gsplat | `/home/csaba/mamba/envs/occnet` (torch 2.12 cu132; `tensorly` only for the bilateral grid) |
 | Python env for DA3 | `/home/csaba/mamba/envs/depth-anything-3` (torch 2.13 cu130), model `depth-anything/DA3-BASE` (Apache-2.0) in the HF cache; run with `HF_HUB_OFFLINE=1` |
@@ -639,3 +640,18 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   in a trace: pattern energy 32 % (bilinear lookups 12 %, Huber 8 %), EUCM projection 19 %, local warp 9 %. The
   decode thread takes ~25 % of the CPU (two INTER_AREA resizes per frame, 2896 -> 1936 -> 968 px), shared with
   the tracing.
+- 2026-10-05: GPU video decoding. `run_vo`, `close_loops`, `export_colmap` and `aimrec_extract` take `--decode
+  cpu|gpu|auto` (default auto: GPU when built with CUDA and a device is there). NVDEC through FFmpeg's `h264_cuvid`
+  (low delay), then one CUDA pass NV12 -> BGR (BT.601/709, full/limited range) at full resolution and the
+  INTER_AREA chain of the run (rig `image_width` scale, then `--scale`) on the GPU; only the 968 px image is
+  copied to the host (`src/sdv/aimrec/gpu_image.cu`). Decoded luma is bit-identical to FFmpeg's software decoder
+  and the resize chain bit-identical to cv::resize (tests `GpuImage.*`); the colour conversion is exact to
+  rounding, swscale's was -0.6 grey levels darker on average (up to 2): images differ from the CPU path by that.
+  The records are intra-only (every frame IDR), so the decoder skips forward without a flush. FFmpeg's h264
+  hwaccel (NVDEC too) waits for every frame: 10 frame sets/s for 6 cameras. Decoding speed, 6 cameras, scaled to
+  968 px (`aimrec_extract --dry-run`): CPU 22 sets/s (the resizes dominate: unscaled 64), GPU 51 sequential, 31
+  every 7th frame. Garage frames 1000-1299: densify subset 51 -> 40 s wall (densify 24.5 -> 21.4 s, keyframe
+  images 16 -> 9 s), 675733 vs 676356 points; odometry 300 frames 38 -> 24 s, poses within 2.8 mm. Six decoders
+  take ~0.9 GB of GPU memory; `--decode cpu` next to a GPU job that needs all of it. The tests
+  `MonoInitializerTest.ForwardMotionWithYaw/Pinhole` and `WindowOptimizerTest.MarginalizationKeepsOptimum...`
+  fail already at 43e21dc (not decoding related, open).

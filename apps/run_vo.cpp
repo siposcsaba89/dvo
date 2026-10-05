@@ -23,6 +23,7 @@
 #include <spdlog/spdlog.h>
 
 #include <sdv/eval/trajectory.h>
+#include <sdv/aimrec/camera_stream.h>
 #include <sdv/io/camera_config.h>
 #include <sdv/io/colmap_export.h>
 #include <sdv/io/frame_source.h>
@@ -55,6 +56,8 @@ int main(int argc, char** argv) {
   std::optional<double> denseMinDepth;
   int denseHostStride = 0;
 
+  std::string decode = "auto";
+
   po::options_description desc("run_vo options");
   desc.add_options()
       ("help,h", "show help")
@@ -67,6 +70,7 @@ int main(int argc, char** argv) {
       ("camera", po::value(&cameraFile),
        "camera YAML (width, height, fx, fy, cx, cy, alpha, beta, optional mask); replaces the KITTI calibration")
       ("scale", po::value(&scale)->default_value(1.0), "resize input images (and camera) by this factor")
+      ("decode", po::value(&decode)->default_value(decode), "video decoding: cpu, gpu (NVDEC, CUDA resizing) or auto")
       ("start", po::value(&start)->default_value(0), "first input frame")
       ("stride", po::value(&stride)->default_value(1), "use every n-th input frame")
       ("max-frames,n", po::value(&maxFrames)->default_value(0), "number of frames to process (0 = all)")
@@ -163,6 +167,8 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     po::notify(vm);
+    if (decode != "cpu" && decode != "gpu" && decode != "auto") throw po::error("--decode must be cpu, gpu or auto");
+    sdv::aimrec::setDecodeDevice(sdv::aimrec::parseDecodeDevice(decode));
   } catch (const po::error& e) {
     spdlog::error("{}", e.what());
     std::cout << desc << '\n';
@@ -242,13 +248,19 @@ int main(int argc, char** argv) {
     double totalMs = 0, maxMs = 0, waitMs = 0;
     int keyframes = 0, weak = 0;
     size_t n = 0;
+    // Resizing left to the caller per input, after the sources have been asked to resize to `s` themselves.
+    std::vector<double> rest(inputs.size());
+    auto requestScale = [&](double s) {
+      for (size_t c = 0; c < inputs.size(); ++c) rest[c] = inputs[c].source->setOutputScale(s) ? 1.0 : s;
+    };
+    requestScale(scale);
     // Decoding and resizing the next frame overlaps with processing the current one. Empty at the end of any stream.
     auto readFrame = [&] {
       std::vector<cv::Mat> images;
-      for (const auto& in : inputs) {
-        const cv::Mat input = in.source->next();
+      for (size_t c = 0; c < inputs.size(); ++c) {
+        const cv::Mat input = inputs[c].source->next();
         if (input.empty()) return std::vector<cv::Mat>{};
-        images.push_back(sdv::prepareImage(input, scale, in.camera));
+        images.push_back(sdv::prepareImage(input, rest[c], inputs[c].camera));
       }
       return images;
     };
@@ -452,6 +464,7 @@ int main(int argc, char** argv) {
       const auto kfs = vo.keyframeIndices();
       sdv::SemiDenseMapper mapper(denseRig, dense);
       for (auto& in : inputs) in.source->rewind();
+      requestScale(s);
       const auto t0 = Clock::now();
       size_t processed = 0;
       for (size_t i = 0; i < poses.size(); ++i) {
@@ -459,7 +472,7 @@ int main(int argc, char** argv) {
         for (int c = 0; c < rig.size(); ++c) {
           const cv::Mat input = inputs[c].source->next();
           if (input.empty()) break;
-          images.push_back(sdv::prepareImage(input, s, denseRig.cameras[c]));
+          images.push_back(sdv::prepareImage(input, rest[c], denseRig.cameras[c]));
         }
         if (static_cast<int>(images.size()) != rig.size()) break;
         if (!poses[i] || brightness[i].empty()) continue;
@@ -540,6 +553,7 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < mapPoints.size(); ++i)
         if (!mapPoints[i].color) pointsOfImage[{mapPoints[i].frameIndex, mapPoints[i].camera}].push_back(i);
       for (auto& in : inputs) in.source->rewind();
+      requestScale(scale);
       const int lastFrame = pointsOfImage.empty() ? -1 : pointsOfImage.rbegin()->first.first;
       for (int frame = 0; frame <= lastFrame; ++frame) {
         bool ended = false;
@@ -553,7 +567,7 @@ int main(int argc, char** argv) {
           const cv::Mat input = inputs[c].source->next();
           if (input.empty()) ended = true;
           if (ended || input.channels() != 3) continue;
-          cv::Mat img = sdv::prepareImage(input, scale, inputs[c].camera);
+          cv::Mat img = sdv::prepareImage(input, rest[c], inputs[c].camera);
           if (img.depth() != CV_8U) img.convertTo(img, CV_8U, img.depth() == CV_16U ? 255.0 / 65535.0 : 1.0);
           for (size_t i : it->second) {
             const cv::Vec3b bgr = img.at<cv::Vec3b>(static_cast<int>(std::lround(mapPoints[i].uv.y())),
@@ -632,6 +646,7 @@ int main(int argc, char** argv) {
       sdv::ColmapExporter exporter(colmapDir, std::move(exportCams), exportSettings);
       const auto keyframeIndices = vo.keyframeIndices();
       for (auto& in : inputs) in.source->rewind();
+      requestScale(scale);
       for (size_t i = 0; i < poses.size(); ++i) {
         const int frame = static_cast<int>(i);
         const bool exported =
@@ -641,7 +656,7 @@ int main(int argc, char** argv) {
         for (int c = 0; c < rig.size(); ++c) {
           const cv::Mat input = inputs[c].source->next();
           if (input.empty()) break;
-          if (exported) images.push_back(sdv::prepareImage(input, scale, inputs[c].camera));
+          if (exported) images.push_back(sdv::prepareImage(input, rest[c], inputs[c].camera));
         }
         if (exported && static_cast<int>(images.size()) < rig.size()) break;
         if (exported) exporter.addFrame(static_cast<int>(frameIndex(i)), images, exportAlignment.applyToPose(*poses[i]));

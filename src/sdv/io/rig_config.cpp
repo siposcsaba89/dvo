@@ -172,7 +172,8 @@ std::vector<RigStream> openRigStreams(const RigConfig& rig, const std::vector<st
     if (!syncNames.empty() && syncNames != labels)
       recording->selectFrames(aimrec::Recording(rig.aimRecord, rig.aimCalibration, syncNames, false).syncedFrameIds());
     for (size_t i = 0; i < selected.size(); ++i)
-      streams.push_back({selected[i], std::make_unique<AimRecordSource>(recording, static_cast<int>(i))});
+      streams.push_back(
+          {selected[i], std::make_unique<AimRecordSource>(recording, static_cast<int>(i), selected[i]->imageScale)});
   } else {
     for (const auto* c : selected) {
       if (c->video.empty()) throw std::invalid_argument("rig camera " + c->name + " has no video");
@@ -180,8 +181,10 @@ std::vector<RigStream> openRigStreams(const RigConfig& rig, const std::vector<st
                                                                static_cast<size_t>(c->frameOffset), 1)});
     }
   }
-  for (auto& s : streams)
-    if (s.config->imageScale != 1.0) s.source = std::make_unique<ScaledSource>(std::move(s.source), s.config->imageScale);
+  if (rig.aimRecord.empty())
+    for (auto& s : streams)
+      if (s.config->imageScale != 1.0)
+        s.source = std::make_unique<ScaledSource>(std::move(s.source), s.config->imageScale);
   return streams;
 }
 

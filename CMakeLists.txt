@@ -6,11 +6,40 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(MSVC)
-  add_compile_options(/W4 /permissive- /utf-8 /bigobj /arch:AVX2)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+    $<$<COMPILE_LANGUAGE:CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/bigobj> $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
   add_compile_definitions(_USE_MATH_DEFINES NOMINMAX _CRT_SECURE_NO_WARNINGS)
 else()
-  add_compile_options(-Wall -Wextra -march=native)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall> $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-march=native>)
 endif()
+
+# NVDEC decoding with CUDA colour conversion and resizing of the camera streams.
+set(SDV_CUDA AUTO CACHE STRING "CUDA support: AUTO (if a CUDA compiler is found), ON or OFF")
+set_property(CACHE SDV_CUDA PROPERTY STRINGS AUTO ON OFF)
+set(SDV_HAVE_CUDA OFF)
+if(NOT SDV_CUDA STREQUAL "OFF")
+  if(NOT DEFINED CMAKE_CUDA_HOST_COMPILER AND NOT MSVC)
+    set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER} CACHE FILEPATH "Host compiler of nvcc")
+  endif()
+  if(NOT CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX} AND EXISTS /usr/local/cuda/bin/nvcc)
+    unset(CMAKE_CUDA_COMPILER CACHE)
+    set(ENV{CUDACXX} /usr/local/cuda/bin/nvcc)
+  endif()
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+      set(CMAKE_CUDA_ARCHITECTURES native)
+    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    set(SDV_HAVE_CUDA ON)
+  elseif(SDV_CUDA STREQUAL "ON")
+    message(FATAL_ERROR "SDV_CUDA=ON, but no CUDA compiler was found")
+  endif()
+endif()
+message(STATUS "CUDA support: ${SDV_HAVE_CUDA}")
 
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(Sophus CONFIG REQUIRED)
@@ -41,6 +70,19 @@ target_include_directories(sdv_aimrec PUBLIC src)
 target_link_libraries(sdv_aimrec PUBLIC Eigen3::Eigen Sophus::Sophus opencv_core
   PRIVATE opencv_imgcodecs opencv_imgproc spdlog::spdlog yaml-cpp::yaml-cpp libzip::zip
   FFmpeg::avcodec FFmpeg::avutil FFmpeg::swscale)
+if(SDV_HAVE_CUDA)
+  add_library(sdv_aimrec_gpu STATIC
+    src/sdv/aimrec/gpu_image.h
+    src/sdv/aimrec/gpu_image.cu
+  )
+  target_include_directories(sdv_aimrec_gpu PUBLIC src)
+  target_compile_features(sdv_aimrec_gpu PUBLIC cuda_std_20)
+  set_target_properties(sdv_aimrec_gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(sdv_aimrec_gpu PRIVATE CUDA::cudart)
+  target_compile_definitions(sdv_aimrec PRIVATE SDV_WITH_CUDA)
+  # hwcontext_cuda.h needs the CUDA driver API header.
+  target_link_libraries(sdv_aimrec PRIVATE sdv_aimrec_gpu CUDA::toolkit)
+endif()
 
 add_library(sdv STATIC
   src/sdv/camera.h
@@ -155,7 +197,7 @@ add_executable(estimate_sync apps/estimate_sync.cpp)
 target_link_libraries(estimate_sync PRIVATE sdv Boost::program_options)
 
 add_executable(run_vo apps/run_vo.cpp)
-target_link_libraries(run_vo PRIVATE sdv Boost::program_options)
+target_link_libraries(run_vo PRIVATE sdv sdv_aimrec Boost::program_options)
 
 add_executable(render_cloud apps/render_cloud.cpp)
 target_link_libraries(render_cloud PRIVATE sdv Boost::program_options)
@@ -170,10 +212,10 @@ add_executable(detect_loops apps/detect_loops.cpp)
 target_link_libraries(detect_loops PRIVATE sdv Boost::program_options)
 
 add_executable(close_loops apps/close_loops.cpp)
-target_link_libraries(close_loops PRIVATE sdv Boost::program_options)
+target_link_libraries(close_loops PRIVATE sdv sdv_aimrec Boost::program_options)
 
 add_executable(export_colmap apps/export_colmap.cpp)
-target_link_libraries(export_colmap PRIVATE sdv Boost::program_options)
+target_link_libraries(export_colmap PRIVATE sdv sdv_aimrec Boost::program_options)
 
 enable_testing()
 add_executable(sdv_tests
@@ -206,5 +248,9 @@ add_executable(sdv_tests
 )
 target_include_directories(sdv_tests PRIVATE tests)
 target_link_libraries(sdv_tests PRIVATE sdv sdv_aimrec libzip::zip GTest::gtest_main)
+if(SDV_HAVE_CUDA)
+  target_sources(sdv_tests PRIVATE tests/test_gpu_image.cpp)
+  target_link_libraries(sdv_tests PRIVATE sdv_aimrec_gpu CUDA::cudart)
+endif()
 include(GoogleTest)
 gtest_discover_tests(sdv_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 60)

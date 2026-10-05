@@ -16,6 +16,7 @@
 #include <boost/program_options.hpp>
 #include <spdlog/spdlog.h>
 
+#include <sdv/aimrec/camera_stream.h>
 #include <sdv/io/camera_config.h>
 #include <sdv/io/colmap_export.h>
 #include <sdv/io/kitti.h>
@@ -66,6 +67,8 @@ int main(int argc, char** argv) {
   double neighbourRadius = 0.2;
   bool correctBrightness = false;
 
+  std::string decode = "auto";
+
   po::options_description desc("export_colmap options");
   desc.add_options()
       ("help,h", "show help")
@@ -84,6 +87,7 @@ int main(int argc, char** argv) {
        "write brightness-corrected images e^-a (I - b) (needs --brightness; clips at 255)")
       ("out", po::value(&outDir)->required(), "output directory (images/, masks/, sparse/0, exposure.txt)")
       ("scale", po::value(&scale)->default_value(scale), "image scale (run_vo --scale for the run resolution)")
+      ("decode", po::value(&decode)->default_value(decode), "video decoding: cpu, gpu (NVDEC, CUDA resizing) or auto")
       ("focal-scale", po::value(&focalScale)->default_value(focalScale),
        "virtual pinhole focal length relative to the camera's (< 1 keeps more of a fisheye)")
       ("min-travel", po::value(&minTravel)->default_value(minTravel),
@@ -108,6 +112,8 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     po::notify(vm);
+    if (decode != "cpu" && decode != "gpu" && decode != "auto") throw po::error("--decode must be cpu, gpu or auto");
+    sdv::aimrec::setDecodeDevice(sdv::aimrec::parseDecodeDevice(decode));
     if (format != "jpg" && format != "png") throw po::error("--format must be jpg or png");
     if (correctBrightness && brightnessFile.empty()) throw po::error("--correct-brightness needs --brightness");
     if (frameStride < 1) throw po::error("--frame-stride must be positive");
@@ -129,10 +135,12 @@ int main(int argc, char** argv) {
     std::vector<sdv::ColmapExportCamera> cameras;
     std::vector<sdv::Camera> prepared;
     std::vector<std::unique_ptr<sdv::FrameSource>> sources;
+    std::vector<double> rest;
     for (auto& s : streams) {
       prepared.push_back(sdv::prepareCamera(s.config->camera, scale, 1));
       cameras.push_back({s.config->name, prepared.back(), s.config->T_b_c.inverse()});
       sources.push_back(std::make_unique<sdv::SubsampledSource>(std::move(s.source), start, stride));
+      rest.push_back(sources.back()->setOutputScale(scale) ? 1.0 : scale);
     }
     const auto brightness =
         brightnessFile.empty() ? std::map<std::string, std::map<int, sdv::AffineBrightness>>{} : loadBrightness(brightnessFile);
@@ -165,7 +173,7 @@ int main(int argc, char** argv) {
         }
         const cv::Mat input = sources[c]->next();
         if (input.empty()) ended = true;
-        else images.push_back(sdv::prepareImage(input, scale, prepared[c]));
+        else images.push_back(sdv::prepareImage(input, rest[c], prepared[c]));
         if (!brightnessFile.empty()) affine.push_back(interpolate(brightness.at(names[c]), frame));
       }
       if (ended) {

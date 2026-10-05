@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -23,6 +24,9 @@ class FrameSource {
   virtual cv::Mat next() = 0;
   virtual bool skip() { return !next().empty(); }
   virtual void rewind() = 0;
+  // Asks the source to resize its frames by `scale` (INTER_AREA, after any resizing of its own), replacing an earlier
+  // request; false if it cannot, then the caller resizes.
+  virtual bool setOutputScale(double /*scale*/) { return false; }
 };
 
 class VideoSource : public FrameSource {
@@ -70,6 +74,7 @@ class SubsampledSource : public FrameSource {
   cv::Mat next() override;
   bool skip() override;
   void rewind() override;
+  bool setOutputScale(double scale) override { return m_source->setOutputScale(scale); }
 
  private:
   std::unique_ptr<FrameSource> m_source;
@@ -91,17 +96,20 @@ class ScaledSource : public FrameSource {
 };
 
 // One camera of an aiMotive recording (BGR), over the frame ids that all open cameras of the recording have, so the
-// sources of one recording stay synchronised when a camera drops a frame. Skipping does not decode.
+// sources of one recording stay synchronised when a camera drops a frame. Skipping does not decode. `imageScale`:
+// INTER_AREA resize of every frame; it and the output scale are applied by the decoder (on the GPU where it decodes).
 class AimRecordSource : public FrameSource {
  public:
-  AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera);
+  AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera, double imageScale = 1.0);
   cv::Mat next() override;
   bool skip() override;
   void rewind() override { m_next = 0; }
+  bool setOutputScale(double scale) override;
 
  private:
   std::shared_ptr<aimrec::Recording> m_recording;
   int m_camera;
+  std::array<double, 2> m_scales;  // image scale, output scale
   size_t m_next = 0;
 };
 

@@ -29,6 +29,7 @@
 #include <sdv/eval/trajectory.h>
 #include <sdv/global_ba.h>
 #include <sdv/image_pyramid.h>
+#include <sdv/aimrec/camera_stream.h>
 #include <sdv/io/camera_config.h>
 #include <sdv/io/frame_source.h>
 #include <sdv/io/kitti.h>
@@ -77,6 +78,7 @@ std::vector<std::vector<cv::Mat>> loadKeyframeImages(const std::string& rigFile,
   for (size_t c = 0; c < streams.size(); ++c) {
     const std::string& name = streams[c].config->name;
     sdv::FrameSource& source = *streams[c].source;
+    const double rest = source.setOutputScale(scale) ? 1.0 : scale;
     long long position = 0;  // next input frame of the stream
     for (size_t k = 0; k < records.size(); ++k) {
       const long long wanted = start + static_cast<long long>(records[k].frameIndex) * stride;
@@ -85,7 +87,7 @@ std::vector<std::vector<cv::Mat>> loadKeyframeImages(const std::string& rigFile,
       const cv::Mat input = source.next();
       ++position;
       if (input.empty()) throw std::runtime_error("input of " + name + " ended early");
-      images[k][c] = sdv::prepareImage(input, scale, cameras[c]);
+      images[k][c] = sdv::prepareImage(input, rest, cameras[c]);
       if (grey && images[k][c].channels() == 3) cv::cvtColor(images[k][c], images[k][c], cv::COLOR_BGR2GRAY);
     }
     spdlog::info("loaded {} keyframe images of {}", records.size(), name);
@@ -101,8 +103,11 @@ std::function<std::vector<cv::Mat>()> rigFrames(const std::string& rigFile, cons
                                                 double scale, int start, int stride) {
   const sdv::RigConfig config = sdv::loadRigConfig(rigFile);
   std::vector<std::shared_ptr<sdv::FrameSource>> sources;
-  for (auto& s : sdv::openRigStreams(config, names, runNames))
+  std::vector<double> rest;
+  for (auto& s : sdv::openRigStreams(config, names, runNames)) {
     sources.push_back(std::make_shared<sdv::SubsampledSource>(std::move(s.source), start, stride));
+    rest.push_back(sources.back()->setOutputScale(scale) ? 1.0 : scale);
+  }
   struct Prefetch {
     std::mutex mutex;
     std::condition_variable changed;
@@ -120,7 +125,7 @@ std::function<std::vector<cv::Mat>()> rigFrames(const std::string& rigFile, cons
     }
   };
   auto prefetch = std::make_shared<Prefetch>();
-  prefetch->worker = std::thread([p = prefetch.get(), sources, rig, scale] {
+  prefetch->worker = std::thread([p = prefetch.get(), sources, rig, rest] {
     try {
       for (;;) {
         std::vector<cv::Mat> images(sources.size());
@@ -130,7 +135,7 @@ std::function<std::vector<cv::Mat>()> rigFrames(const std::string& rigFile, cons
           decoders.emplace_back([&, c] {
             const cv::Mat input = sources[c]->next();
             if (input.empty()) ended[c] = 1;
-            else images[c] = sdv::prepareImage(input, scale, rig.cameras[c]);
+            else images[c] = sdv::prepareImage(input, rest[c], rig.cameras[c]);
           });
         for (auto& d : decoders) d.join();
         std::unique_lock lock(p->mutex);
@@ -190,6 +195,7 @@ std::vector<std::array<std::uint8_t, 3>> pointColours(const std::string& rigFile
   std::vector<std::array<std::uint8_t, 3>> rgb(pba.points.size());
   for (size_t c = 0; c < streams.size(); ++c) {
     sdv::FrameSource& source = *streams[c].source;
+    const double rest = source.setOutputScale(scale) ? 1.0 : scale;
     long long position = 0;
     for (size_t k = 0; k < records.size(); ++k) {
       if (byHost[c][k].empty()) continue;
@@ -199,7 +205,7 @@ std::vector<std::array<std::uint8_t, 3>> pointColours(const std::string& rigFile
       const cv::Mat input = source.next();
       ++position;
       if (input.empty()) throw std::runtime_error("input of " + streams[c].config->name + " ended early");
-      const cv::Mat image = sdv::prepareImage(input, scale, cameras[c]);
+      const cv::Mat image = sdv::prepareImage(input, rest, cameras[c]);
       for (const size_t i : byHost[c][k]) rgb[i] = rgbAt(image, pba.pointUv[i]);
     }
   }
@@ -228,6 +234,7 @@ int main(int argc, char** argv) {
   std::string pbaSolver, pbaOptimizer;
   double densifyMinMotion = 0, densifyMinRotationDeg = 0;
   size_t densifyMaxFrames = 0, densifyFirstFrame = 0;
+  std::string decode = "auto";
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -258,6 +265,7 @@ int main(int argc, char** argv) {
       ("sequence", po::value(&sequenceDir), "KITTI sequence of the run (stereo) for the keyframe images")
       ("rig-cameras", po::value(&rigCameras)->multitoken(), "rig cameras of the run, in its order")
       ("scale", po::value(&scale)->default_value(1.0), "run_vo --scale")
+      ("decode", po::value(&decode)->default_value(decode), "video decoding: cpu, gpu (NVDEC, CUDA resizing) or auto")
       ("pba-neighbours", po::value(&pbaSettings.neighbours)->default_value(pbaSettings.neighbours),
        "keyframes before and after the host a point is observed in")
       ("pba-iterations", po::value(&pbaSettings.iterations)->default_value(pbaSettings.iterations), "iterations per round")
@@ -384,6 +392,8 @@ int main(int argc, char** argv) {
       return EXIT_SUCCESS;
     }
     po::notify(vm);
+    if (decode != "cpu" && decode != "gpu" && decode != "auto") throw po::error("--decode must be cpu, gpu or auto");
+    sdv::aimrec::setDecodeDevice(sdv::aimrec::parseDecodeDevice(decode));
     refineIntrinsics = vm.count("pba-intrinsics") > 0;
     if (up.size() != 3) throw po::error("--up takes 3 values");
     using Solver = sdv::PhotometricBASettings::Solver;

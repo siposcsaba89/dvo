@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -42,7 +43,8 @@ class Recording {
   // stream(cam).meta().
   std::int64_t timestampNs(std::uint64_t frameId) const;
   // One image per open camera, decoded in parallel. Throws if a camera lacks the frame.
-  std::vector<cv::Mat> read(std::uint64_t frameId, ImageFormat format = ImageFormat::Gray);
+  std::vector<cv::Mat> read(std::uint64_t frameId, ImageFormat format = ImageFormat::Gray,
+                            std::span<const double> scales = {});
 
  private:
   std::string m_vehicle;

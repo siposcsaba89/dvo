@@ -131,11 +131,11 @@ std::int64_t Recording::timestampNs(std::uint64_t frameId) const {
   return earliest;
 }
 
-std::vector<cv::Mat> Recording::read(std::uint64_t frameId, ImageFormat format) {
+std::vector<cv::Mat> Recording::read(std::uint64_t frameId, ImageFormat format, std::span<const double> scales) {
   std::vector<std::future<cv::Mat>> jobs;
   jobs.reserve(m_streams.size());
   for (auto& s : m_streams)
-    jobs.push_back(std::async(std::launch::async, [&s, frameId, format] { return s.decodeFrameId(frameId, format); }));
+    jobs.push_back(std::async(std::launch::async, [&s, frameId, format, scales] { return s.decodeFrameId(frameId, format, scales); }));
   std::vector<cv::Mat> images;
   images.reserve(jobs.size());
   for (auto& j : jobs) images.push_back(j.get());

@@ -71,13 +71,18 @@ cv::Mat ScaledSource::next() {
   return out;
 }
 
-AimRecordSource::AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera)
-    : m_recording(std::move(recording)), m_camera(camera) {}
+AimRecordSource::AimRecordSource(std::shared_ptr<aimrec::Recording> recording, int camera, double imageScale)
+    : m_recording(std::move(recording)), m_camera(camera), m_scales{imageScale, 1.0} {}
+
+bool AimRecordSource::setOutputScale(double scale) {
+  m_scales[1] = scale;
+  return true;
+}
 
 cv::Mat AimRecordSource::next() {
   const auto& ids = m_recording->syncedFrameIds();
   if (m_next >= ids.size()) return {};
-  return m_recording->stream(m_camera).decodeFrameId(ids[m_next++], aimrec::ImageFormat::Bgr);
+  return m_recording->stream(m_camera).decodeFrameId(ids[m_next++], aimrec::ImageFormat::Bgr, m_scales);
 }
 
 bool AimRecordSource::skip() {
