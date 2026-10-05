@@ -1,8 +1,11 @@
 #include <sdv/semi_dense_mapper.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <execution>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 
 #include <sdv/parallel.h>
@@ -10,6 +13,9 @@
 namespace sdv {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+double since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
 
 PointSelectorSettings selectorSettings(const SemiDenseSettings& s) {
   PointSelectorSettings p;
@@ -41,19 +47,26 @@ void SemiDenseMapper::addFrame(int frameIndex, const std::vector<cv::Mat>& image
     throw std::invalid_argument("one image and one brightness per rig camera required");
   std::vector<std::shared_ptr<const ImagePyramid>> pyr(nc);
   std::vector<Sophus::SE3d> T_c_w(nc);
+  auto t0 = Clock::now();
   for (int c = 0; c < nc; ++c) {
     pyr[c] = std::make_shared<const ImagePyramid>(toFloatGray(images[c]), 1);
     T_c_w[c] = m_rig.T_c_b[c] * T_w_b.inverse();
   }
+  m_stats.pyramid += since(t0);
   if (m_settings.verify) m_frames.push_back({frameIndex, pyr, T_c_w, affine});
 
-  for (Host& h : m_hosts)
-    for (int c = 0; c < nc; ++c) traceInto(h, c, pyr[c]->level(0), T_c_w[c], affine[c], c != h.camera);
+  t0 = Clock::now();
+  traceFrame(frameIndex, pyr, T_c_w, affine);
+  m_stats.trace += since(t0);
+  t0 = Clock::now();
   while (!m_hosts.empty() && frameIndex - m_hosts.front().frameIndex >= m_settings.traceFrames) {
     close(m_hosts.front());
     m_hosts.pop_front();
   }
+  m_stats.close += since(t0);
+  t0 = Clock::now();
   if (host) createHosts(frameIndex, images, pyr, T_c_w, affine);
+  m_stats.create += since(t0);
   const int oldest = m_hosts.empty() ? frameIndex : m_hosts.front().frameIndex;
   while (!m_frames.empty() && m_frames.front().frameIndex < oldest) m_frames.pop_front();
 }
@@ -62,9 +75,13 @@ void SemiDenseMapper::createHosts(int frameIndex, const std::vector<cv::Mat>& im
                                   const std::vector<std::shared_ptr<const ImagePyramid>>& pyr,
                                   const std::vector<Sophus::SE3d>& T_c_w, const std::vector<AffineBrightness>& affine) {
   const int nc = m_rig.size();
-  for (int c = 0; c < nc; ++c) {
+  std::vector<Host> fresh(nc);
+  std::vector<int> cams(nc);
+  std::iota(cams.begin(), cams.end(), 0);
+  std::for_each(std::execution::par, cams.begin(), cams.end(), [&](int c) {
     const ImageLevel& img = pyr[c]->level(0);
-    Host h{frameIndex, c, T_c_w[c], affine[c], {}, {}, {}, images[c].channels() == 3};
+    Host& h = fresh[c];
+    h = {frameIndex, c, T_c_w[c], affine[c], {}, {}, {}, images[c].channels() == 3};
     for (const auto& cand : m_selector.select(img, m_rig.cameras[c].maskImage())) {
       auto p = ImmaturePoint::create(m_rig.cameras[c], img, cand.uv.cast<double>(), m_settings.trace);
       if (!p) continue;
@@ -72,40 +89,86 @@ void SemiDenseMapper::createHosts(int frameIndex, const std::vector<cv::Mat>& im
       h.intensity.push_back(img.at(cand.uv.x(), cand.uv.y())[0]);
       if (h.hasColor) h.color.push_back(rgbAt(images[c], cand.uv.x(), cand.uv.y()));
     }
+  });
+  // The other cameras of the same frame: fixed extrinsic baseline, metric even where the rig barely moves. One pass
+  // over the new points, each into the other cameras in order.
+  std::vector<size_t> start{0};
+  std::vector<HostTargetState> states;
+  for (const Host& h : fresh) {
     m_stats.candidates += static_cast<long long>(h.points.size());
-    // The other cameras of the same frame: fixed extrinsic baseline, metric even where the rig barely moves.
-    for (int other = 0; other < nc; ++other)
-      if (other != c) traceInto(h, other, pyr[other]->level(0), T_c_w[other], affine[other], false);
-    m_hosts.push_back(std::move(h));
+    start.push_back(start.back() + h.points.size());
+    for (int c = 0; c < nc; ++c) {
+      HostTargetState s;
+      s.T_t_h = T_c_w[c] * h.T_c_w.inverse();
+      s.host = h.affine;
+      s.target = affine[c];
+      states.push_back(s);
+    }
   }
+  std::array<long long, kParallelChunks> traces{}, good{};
+  parallelChunks(start.back(), [&](size_t chunk, size_t begin, size_t end) {
+    size_t hi = static_cast<size_t>(std::upper_bound(start.begin(), start.end(), begin) - start.begin()) - 1;
+    for (size_t g = begin; g < end; ++g) {
+      while (g >= start[hi + 1]) ++hi;
+      ImmaturePoint& p = fresh[hi].points[g - start[hi]];
+      for (int c = 0; c < nc; ++c)
+        if (c != static_cast<int>(hi))
+          tracePoint(p, m_rig.cameras[c], pyr[c]->level(0), states[hi * nc + c], false, traces[chunk], good[chunk]);
+    }
+  });
+  for (size_t k = 0; k < kParallelChunks; ++k) m_stats.traces += traces[k], m_stats.good += good[k];
+  for (Host& h : fresh) m_hosts.push_back(std::move(h));
 }
 
-void SemiDenseMapper::traceInto(Host& h, int camera, const ImageLevel& img, const Sophus::SE3d& T_c_w,
-                                const AffineBrightness& affine, bool requireVisible) {
-  HostTargetState state;
-  state.T_t_h = T_c_w * h.T_c_w.inverse();
-  state.host = h.affine;
-  state.target = affine;
-  const Camera& cam = m_rig.cameras[camera];
+// One trace of p into a target image; counts traces that saw the point and good ones.
+void SemiDenseMapper::tracePoint(ImmaturePoint& p, const Camera& cam, const ImageLevel& img,
+                                 const HostTargetState& state, bool requireVisible, long long& traces,
+                                 long long& good) const {
+  if (p.numOutliers() > p.numGood() + 2) return;
+  if (requireVisible) {
+    // Another camera at a later time sees only a small part of the host image; skip the others cheaply.
+    Eigen::Vector2d uv;
+    if (p.numGood() == 0 || !projectBearing(p.bearing(), p.rho(), state.T_t_h, cam, uv) ||
+        !cam.isInside(uv.x(), uv.y(), 4.0))
+      return;
+  }
+  // A target that cannot see the point must not undo what the others matched.
+  ImmaturePoint traced = p;
+  const TraceStatus s = traced.trace(cam, img, state, m_settings.trace);
+  if (s == TraceStatus::OutOfBounds || s == TraceStatus::Skipped) return;
+  ++traces;
+  good += s == TraceStatus::Good;
+  p = std::move(traced);
+}
+
+// All open hosts into all cameras of a new frame, in one parallel pass over their points (each point still visits
+// the cameras in order, so the result is that of one pass per host and camera).
+void SemiDenseMapper::traceFrame(int frameIndex, const std::vector<std::shared_ptr<const ImagePyramid>>& pyr,
+                                 const std::vector<Sophus::SE3d>& T_c_w, const std::vector<AffineBrightness>& affine) {
+  const int nc = m_rig.size();
+  std::vector<size_t> start{0};
+  std::vector<HostTargetState> states;
+  for (const Host& h : m_hosts) {
+    start.push_back(start.back() + h.points.size());
+    for (int c = 0; c < nc; ++c) {
+      HostTargetState s;
+      s.T_t_h = T_c_w[c] * h.T_c_w.inverse();
+      s.host = h.affine;
+      s.target = affine[c];
+      states.push_back(s);
+    }
+  }
   std::array<long long, kParallelChunks> traces{}, good{};
-  parallelChunks(h.points.size(), [&](size_t chunk, size_t begin, size_t end) {
-    for (size_t i = begin; i < end; ++i) {
-      ImmaturePoint& p = h.points[i];
-      if (p.numOutliers() > p.numGood() + 2) continue;
-      if (requireVisible) {
-        // Another camera at a later time sees only a small part of the host image; skip the others cheaply.
-        Eigen::Vector2d uv;
-        if (p.numGood() == 0 || !projectBearing(p.bearing(), p.rho(), state.T_t_h, cam, uv) ||
-            !cam.isInside(uv.x(), uv.y(), 4.0))
-          continue;
-      }
-      // A target that cannot see the point must not undo what the others matched.
-      ImmaturePoint traced = p;
-      const TraceStatus s = traced.trace(cam, img, state, m_settings.trace);
-      if (s == TraceStatus::OutOfBounds || s == TraceStatus::Skipped) continue;
-      ++traces[chunk];
-      good[chunk] += s == TraceStatus::Good;
-      p = std::move(traced);
+  parallelChunks(start.back(), [&](size_t chunk, size_t begin, size_t end) {
+    size_t hi = static_cast<size_t>(std::upper_bound(start.begin(), start.end(), begin) - start.begin()) - 1;
+    for (size_t g = begin; g < end; ++g) {
+      while (g >= start[hi + 1]) ++hi;
+      Host& h = m_hosts[hi];
+      ImmaturePoint& p = h.points[g - start[hi]];
+      if (m_settings.dropFrames > 0 && p.numGood() == 0 && frameIndex - h.frameIndex >= m_settings.dropFrames) continue;
+      for (int c = 0; c < nc; ++c)
+        tracePoint(p, m_rig.cameras[c], pyr[c]->level(0), states[hi * nc + c], c != h.camera, traces[chunk],
+                   good[chunk]);
     }
   });
   for (size_t k = 0; k < kParallelChunks; ++k) m_stats.traces += traces[k], m_stats.good += good[k];

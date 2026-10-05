@@ -4,15 +4,20 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/program_options.hpp>
@@ -89,21 +94,70 @@ std::vector<std::vector<cv::Mat>> loadKeyframeImages(const std::string& rigFile,
 }
 
 // Images of run frame 0, 1, 2, ... of the named rig cameras (`rig`, in rig order), prepared like the run; empty at
-// the end. `runNames`: the cameras of the run, whose frames these are.
+// the end. `runNames`: the cameras of the run, whose frames these are. The cameras are decoded in parallel, by a
+// background thread that stays up to three frames ahead of the caller.
 std::function<std::vector<cv::Mat>()> rigFrames(const std::string& rigFile, const std::vector<std::string>& names,
                                                 const std::vector<std::string>& runNames, const sdv::Rig& rig,
                                                 double scale, int start, int stride) {
-  auto config = std::make_shared<const sdv::RigConfig>(sdv::loadRigConfig(rigFile));
+  const sdv::RigConfig config = sdv::loadRigConfig(rigFile);
   std::vector<std::shared_ptr<sdv::FrameSource>> sources;
-  for (auto& s : sdv::openRigStreams(*config, names, runNames))
+  for (auto& s : sdv::openRigStreams(config, names, runNames))
     sources.push_back(std::make_shared<sdv::SubsampledSource>(std::move(s.source), start, stride));
-  return [config, sources, rig, scale] {
-    std::vector<cv::Mat> images;
-    for (size_t c = 0; c < sources.size(); ++c) {
-      const cv::Mat input = sources[c]->next();
-      if (input.empty()) return std::vector<cv::Mat>{};
-      images.push_back(sdv::prepareImage(input, scale, rig.cameras[c]));
+  struct Prefetch {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<std::vector<cv::Mat>> frames;
+    bool done = false, stop = false;
+    std::exception_ptr error;
+    std::thread worker;
+    ~Prefetch() {
+      {
+        std::lock_guard lock(mutex);
+        stop = true;
+      }
+      changed.notify_all();
+      if (worker.joinable()) worker.join();
     }
+  };
+  auto prefetch = std::make_shared<Prefetch>();
+  prefetch->worker = std::thread([p = prefetch.get(), sources, rig, scale] {
+    try {
+      for (;;) {
+        std::vector<cv::Mat> images(sources.size());
+        std::vector<char> ended(sources.size(), 0);
+        std::vector<std::thread> decoders;
+        for (size_t c = 0; c < sources.size(); ++c)
+          decoders.emplace_back([&, c] {
+            const cv::Mat input = sources[c]->next();
+            if (input.empty()) ended[c] = 1;
+            else images[c] = sdv::prepareImage(input, scale, rig.cameras[c]);
+          });
+        for (auto& d : decoders) d.join();
+        std::unique_lock lock(p->mutex);
+        p->changed.wait(lock, [&] { return p->stop || p->frames.size() < 3; });
+        if (p->stop) return;
+        if (std::ranges::count(ended, 1) > 0) break;
+        p->frames.push_back(std::move(images));
+        p->changed.notify_all();
+      }
+    } catch (...) {
+      std::lock_guard lock(p->mutex);
+      p->error = std::current_exception();
+    }
+    std::lock_guard lock(p->mutex);
+    p->done = true;
+    p->changed.notify_all();
+  });
+  return [prefetch] {
+    std::unique_lock lock(prefetch->mutex);
+    prefetch->changed.wait(lock, [&] { return !prefetch->frames.empty() || prefetch->done; });
+    if (prefetch->frames.empty()) {
+      if (prefetch->error) std::rethrow_exception(prefetch->error);
+      return std::vector<cv::Mat>{};
+    }
+    std::vector<cv::Mat> images = std::move(prefetch->frames.front());
+    prefetch->frames.pop_front();
+    prefetch->changed.notify_all();
     return images;
   };
 }
@@ -172,6 +226,7 @@ int main(int argc, char** argv) {
   sdv::GlobalBASettings baSettings;
   sdv::PhotometricBASettings pbaSettings;
   std::string pbaSolver, pbaOptimizer;
+  double densifyMinMotion = 0, densifyMinRotationDeg = 0;
   po::options_description desc("close_loops options");
   desc.add_options()
       ("help", "show help")
@@ -272,6 +327,12 @@ int main(int argc, char** argv) {
        "candidate pixels per keyframe image")
       ("densify-frames", po::value(&dense.traceFrames)->default_value(dense.traceFrames),
        "following input frames each keyframe host is traced into")
+      ("densify-drop-frames", po::value(&dense.dropFrames)->default_value(dense.dropFrames),
+       "> 0: candidates without a good trace this many frames after their host are not traced further")
+      ("densify-min-motion", po::value(&densifyMinMotion)->default_value(densifyMinMotion),
+       "> 0: frames between keyframes are traced only after this much travel (m) or --densify-min-rotation since "
+       "the last traced frame")
+      ("densify-min-rotation", po::value(&densifyMinRotationDeg)->default_value(densifyMinRotationDeg), "deg")
       ("densify-min-depth", po::value(&dense.minDepth)->default_value(dense.minDepth), "initial search range, m")
       ("densify-min-good", po::value(&dense.minGood)->default_value(dense.minGood), "good traces a point needs")
       ("densify-interval", po::value(&dense.maxInterval)->default_value(dense.maxInterval),
@@ -662,8 +723,13 @@ int main(int argc, char** argv) {
         images = {};  // not needed any more: densify streams its frames (~10 GB on long runs)
         sdv::SemiDenseMapper mapper(denseRig, dense);
         size_t k = 0;
+        double decodeTime = 0;
+        std::optional<Sophus::SE3d> lastTraced;
+        size_t skippedFrames = 0;
         for (size_t i = 0; i < poses.size(); ++i) {
+          const auto td = std::chrono::steady_clock::now();
           const std::vector<cv::Mat> frame = nextFrame();
+          decodeTime += std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count();
           if (frame.empty()) break;
           while (k + 1 < records.size() && records[k + 1].frameIndex <= static_cast<int>(i)) ++k;
           const bool host = records[k].frameIndex == static_cast<int>(i);
@@ -675,6 +741,15 @@ int main(int argc, char** argv) {
             const auto a = keyframeBrightness(k, c), b = keyframeBrightness(std::min(k + 1, records.size() - 1), c);
             brightness[c] = {(1 - w) * a.a + w * b.a, (1 - w) * a.b + w * b.b};
           }
+          // Frames close to the last traced one add little (standstill, slow driving): traced only after some motion.
+          if (densifyMinMotion > 0 && !host && lastTraced) {
+            const Sophus::SE3d d = lastTraced->inverse() * poses[i];
+            if (d.translation().norm() < densifyMinMotion && d.so3().log().norm() < densifyMinRotationDeg * M_PI / 180.0) {
+              ++skippedFrames;
+              continue;
+            }
+          }
+          lastTraced = poses[i];
           mapper.addFrame(static_cast<int>(i), frame, poses[i], brightness, host);
           if ((i + 1) % 200 == 0) spdlog::info("densify: {} frames", i + 1);
         }
@@ -695,6 +770,9 @@ int main(int argc, char** argv) {
                      st.candidates, static_cast<double>(st.good) / std::max<long long>(st.candidates, 1), st.accepted,
                      st.rejectMatches, st.rejectInterval, st.rejectVerify, densePoints.size(), added, limit,
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        spdlog::info("densify time: waiting for frames {:.1f} s, pyramids {:.1f}, traces {:.1f}, new hosts {:.1f}, "
+                     "closing {:.1f}; {} frames skipped (little motion)",
+                     decodeTime, st.pyramid, st.trace, st.create, st.close, skippedFrames);
       }
       if (merge) {
         size_t merged = 0;

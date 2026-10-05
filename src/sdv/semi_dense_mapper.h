@@ -21,6 +21,7 @@ struct SemiDenseSettings {
   int traceFrames = 30;  // a host is traced into the images of this many following input frames
   double minDepth = 0.5;  // initial search range
   int minGood = 3;
+  int dropFrames = 0;  // > 0: a candidate without a good trace this many frames after its host is not traced further
   double maxOutlierRatio = 0.2;  // outlier traces per good trace
   double maxInterval = 0.02;  // half width of the inverse-depth interval relative to the inverse depth
   // Multi-view consistency: points count per voxel of this size (world units); 0 = off.
@@ -56,6 +57,9 @@ class SemiDenseMapper {
   struct Stats {
     long long traces = 0, good = 0, candidates = 0, accepted = 0, merged = 0;
     long long rejectMatches = 0, rejectInterval = 0, rejectVerify = 0;
+    // Seconds: image pyramids, traces into later frames, new hosts (selection and the traces into the other cameras
+    // of their frame), closing hosts.
+    double pyramid = 0, trace = 0, create = 0, close = 0;
   };
   const Stats& stats() const { return m_stats; }
 
@@ -74,8 +78,10 @@ class SemiDenseMapper {
   void createHosts(int frameIndex, const std::vector<cv::Mat>& images,
                    const std::vector<std::shared_ptr<const ImagePyramid>>& pyr, const std::vector<Sophus::SE3d>& T_c_w,
                    const std::vector<AffineBrightness>& affine);
-  void traceInto(Host& h, int camera, const ImageLevel& img, const Sophus::SE3d& T_c_w, const AffineBrightness& affine,
-                 bool requireVisible);
+  void traceFrame(int frameIndex, const std::vector<std::shared_ptr<const ImagePyramid>>& pyr, const std::vector<Sophus::SE3d>& T_c_w,
+                  const std::vector<AffineBrightness>& affine);
+  void tracePoint(ImmaturePoint& p, const Camera& cam, const ImageLevel& img, const HostTargetState& state,
+                  bool requireVisible, long long& traces, long long& good) const;
   struct BufferedFrame {
     int frameIndex;
     std::vector<std::shared_ptr<const ImagePyramid>> pyr;

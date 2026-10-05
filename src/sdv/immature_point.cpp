@@ -106,8 +106,8 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
     double energy;
     double rhoStep;
   };
-  std::vector<Sample> samples;
-  samples.reserve(settings.maxSamples + 1);
+  thread_local std::vector<Sample> samples;  // reused: traces run millions of times per frame in the densify
+  samples.clear();
   const double step = std::max(settings.stepPixels, length / settings.maxSamples);
   for (double rho = rMin; rho <= rMax && samples.size() <= size_t(settings.maxSamples) * 2;) {
     Eigen::Vector2d uv, dRho;
