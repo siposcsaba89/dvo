@@ -148,6 +148,9 @@ target_link_libraries(rig_from_sensorconfig PRIVATE sdv sdv_aimrec Boost::progra
 add_executable(aimrec_extract apps/aimrec_extract.cpp)
 target_link_libraries(aimrec_extract PRIVATE sdv_aimrec spdlog::spdlog opencv_imgcodecs Boost::program_options)
 
+add_executable(export_egomotion apps/export_egomotion.cpp)
+target_link_libraries(export_egomotion PRIVATE sdv sdv_aimrec Boost::program_options)
+
 add_executable(estimate_sync apps/estimate_sync.cpp)
 target_link_libraries(estimate_sync PRIVATE sdv Boost::program_options)
 
