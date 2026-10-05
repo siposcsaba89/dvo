@@ -110,7 +110,7 @@ keyframe image again; the pipeline does not need them.
 $B/detect_loops --keyframes $R/keyframes.kfr --vocabulary $V --out $R/loops.txt --verbose
 $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
     --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 [--pba-block-keyframes 200] \
-    --densify --densify-cameras $GS --merge --densify-min-quality 3 --free-space \
+    --densify --densify-cameras $GS --merge --densify-min-quality 3 --free-space --densify-drop-frames 5 \
     --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply
 python tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply
 python tools/plot_trajectory.py $R/diag/trajectory.png $R/poses.txt $R/diag/poses_loop.txt
@@ -136,7 +136,9 @@ both). Chili (1357 keyframes, 7.5 M candidate residuals): ~19 GB instead of ~45 
 more other densify host images saw through (they measured a surface clearly behind it) are removed. Zion garage, held
 out views: floaters 3.5 -> 1.2 %, 6 % fewer points, 9 s. `--densify-verify` (refines each point's inverse depth
 over all buffered views and needs photometric agreement in several of them) gets ~0.8 % and a tighter depth, but
-removes ~40 % of the points; not in the default `DENSIFY_ARGS` until a GS comparison.
+removes ~40 % of the points; not in the default `DENSIFY_ARGS` until a GS comparison. `--densify-drop-frames 5`: a candidate
+without a good trace 5 frames after its host is not traced further (garage: traces -23 %, 1.5 % fewer points,
+floaters unchanged).
 
 `poses_loop.txt`: body poses of all frames. `cloud.ply`: densified, merged cloud (neighbour filter 3 within 0.2 m).
 `points.ply`: every point with its attributes (observations, depth sigma, kept); the **trusted points** of the later

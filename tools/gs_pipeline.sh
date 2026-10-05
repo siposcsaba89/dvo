@@ -11,7 +11,7 @@
 #   DA3_GROUPS multi-view DA3 passes, "window cameras:saved cameras" separated by ";" (a window holds at most
 #              4 cameras x 7 frames on a 16 GB GPU)
 #   VO_ARGS    extra run_vo options (--trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5)
-#   DENSIFY_ARGS  extra close_loops densify options (--densify-min-quality 3 --free-space; add --densify-verify for a
+#   DENSIFY_ARGS  extra close_loops densify options (--densify-min-quality 3 --free-space --densify-drop-frames 5; add --densify-verify for a
 #              cleaner but ~40 % smaller cloud)
 #   REFINE_RIG=1  refine the rig extrinsics first (metric scale held) (stage rig, first RIG_FRAMES=3000 frames) and run everything with
 #              rig/rig_refined.yaml; for rigs with a camera that is off (6 cameras with F_MIDRANGECAM_C: 0.16 deg).
@@ -44,7 +44,7 @@ GS_CAMS=${GS_CAMS:-$VO_CAMS$([[ " $VO_CAMS " == *" B_MIDRANGECAM_C "* ]] || echo
 DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R:B_MIDRANGECAM_C"}
 # Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
 VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}
-DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space}
+DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space --densify-drop-frames 5}
 FORWARD=${FORWARD:-1.55}
 HEIGHT=${HEIGHT:-1.50}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True HF_HUB_OFFLINE=1
