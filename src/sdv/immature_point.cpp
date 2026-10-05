@@ -115,6 +115,8 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
   const Eigen::Vector3d Rb = T.so3() * m_bearing;
   const Eigen::Vector3d& t = T.translation();
   const double step = std::max(settings.stepPixels, length / settings.maxSamples);
+  const int coarse = settings.coarseStep > 1 && length / step > settings.coarseMinSamples ? settings.coarseStep : 1;
+  const double sampleStep = coarse * step;
   for (double rho = rMin; rho <= rMax && samples.size() <= size_t(settings.maxSamples) * 2;) {
     Eigen::Vector2d uv;
     Eigen::Matrix<double, 2, 3> J;
@@ -122,11 +124,36 @@ TraceStatus ImmaturePoint::trace(const Camera& cam, const ImageLevel& img, const
     const Eigen::Vector2d dRho = J * t;
     const double speed = dRho.norm();
     if (speed < 1e-9) break;
-    const double rhoStep = step / speed;
+    const double rhoStep = sampleStep / speed;
     if (cam.isInside(uv.x(), uv.y(), border)) samples.push_back({rho, uv, patternEnergy(uv, offsets, img, state, scale, huber), rhoStep});
     rho += rhoStep;
   }
   if (samples.empty()) return finish(TraceStatus::OutOfBounds);
+  if (coarse > 1) {
+    auto argmin = [&](auto&& accept) {
+      size_t m = samples.size();
+      for (size_t i = 0; i < samples.size(); ++i)
+        if (accept(samples[i]) && (m == samples.size() || samples[i].energy < samples[m].energy)) m = i;
+      return m;
+    };
+    const size_t first = argmin([](const Sample&) { return true; });
+    const Eigen::Vector2d firstUv = samples[first].uv;
+    const size_t second =
+        argmin([&](const Sample& s) { return (s.uv - firstUv).norm() > settings.secondBestExclusionPixels; });
+    const size_t coarseCount = samples.size();
+    for (const size_t c : {first, second}) {
+      if (c >= coarseCount) continue;
+      const double rho0 = samples[c].rho, fine = samples[c].rhoStep / coarse;
+      samples[c].rhoStep = fine;
+      for (int j = 1 - coarse; j < coarse; ++j) {
+        const double rho = rho0 + j * fine;
+        if (j == 0 || rho < rMin || rho > rMax) continue;
+        Eigen::Vector2d uv;
+        if (!cam.project(Eigen::Vector3d(Rb + rho * t), uv) || !cam.isInside(uv.x(), uv.y(), border)) continue;
+        samples.push_back({rho, uv, patternEnergy(uv, offsets, img, state, scale, huber), fine});
+      }
+    }
+  }
 
   const auto bestIt = std::min_element(samples.begin(), samples.end(),
                                        [](const Sample& a, const Sample& b) { return a.energy < b.energy; });

@@ -112,7 +112,7 @@ $B/detect_loops --keyframes $R/keyframes.kfr --vocabulary $V --out $R/loops.txt 
 $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $R/rig/rig.yaml \
     --rig-cameras $VO --scale 0.5 --photometric --pba-points 120 [--pba-block-keyframes 200] \
     --densify --densify-cameras $GS --merge --densify-min-quality 3 --free-space --densify-drop-frames 5 \
-    --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply
+    --densify-coarse-step 2 --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply
 python tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply
 python tools/plot_trajectory.py $R/diag/trajectory.png $R/poses.txt $R/diag/poses_loop.txt
 ```
@@ -139,7 +139,9 @@ out views: floaters 3.5 -> 1.2 %, 6 % fewer points, 9 s. `--densify-verify` (ref
 over all buffered views and needs photometric agreement in several of them) gets ~0.8 % and a tighter depth, but
 removes ~40 % of the points; not in the default `DENSIFY_ARGS` until a GS comparison. `--densify-drop-frames 5`: a candidate
 without a good trace 5 frames after its host is not traced further (garage: traces -23 %, 1.5 % fewer points,
-floaters unchanged).
+floaters unchanged). `--densify-coarse-step 2`: epipolar searches longer than 16 steps sample every 2nd pixel, then
+pixel by pixel around the best match and the best one beyond the ambiguity exclusion (densify -15 %, same points and
+precision).
 
 `poses_loop.txt`: body poses of all frames. `cloud.ply`: densified, merged cloud (neighbour filter 3 within 0.2 m).
 `points.ply`: every point with its attributes (observations, depth sigma, kept); the **trusted points** of the later
@@ -663,3 +665,15 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   byte-identical (garage subset). Rerun: peak 18.3 GB WSL; BA 790 s, densify 1463 s (traces 1046, waiting for frames
   6.6), 74.8 M accepted -> 63.9 M after the voxel check -> merge 45.5 M (19.4 M pairs, 16 s) -> free space -2.76 M
   (337 s) -> 42.7 M points written. Trajectory: `diag/trajectory_loop.ply` (levelled, blue -> red over time).
+- 2026-10-05: free-space filter 2.2x faster, result identical: points stored cell by cell (contiguous positions),
+  cells beyond the radius or outside a view's field of view (the largest angle of the image border from the optical
+  axis, +1 deg) skipped. voxelnet cloud (42.7 M points, 15073 views): 295 -> 137 s, support / through / floater flags
+  of every point equal; smaller cells (radius/8, /16) no faster. Coarse-to-fine epipolar search
+  (`--densify-coarse-step`, TraceSettings::coarseStep, default 1 = off; pipeline 2): garage frames 1000-1299 densify
+  20.0 -> 16.9 s (traces 13.6 -> 11.5, new hosts 3.7 -> 2.7), 893 k vs 893 k accepted, 628.5 k vs 628.3 k after
+  merge; cloud_consistency floaters 0.30 vs 0.19 % against the step-1 views but 0.17 vs 0.26 % against the step-2
+  views (the reference favours its own cloud: equal), core depth rms 0.85 vs 0.84 %. Step 3: -20 %, 0.8 % fewer
+  points. Odometry keeps step 1 (not tested). Joint sparse + PCG photometric BA on voxelnet (`--pba-sparse-band 0
+  --pba-pcg 30` instead of blocks of 200): 705 s (CPU shared with benchmarks) vs 790 s, rmse 7.25 vs 7.28 (different
+  residual sets after the outlier rounds), peak 23.4 vs ~17 GB WSL; trajectories differ by 5 cm median, 0.6 m max
+  after a similarity alignment. No reference to tell which is closer: blocks stay the default.

@@ -20,6 +20,10 @@ struct TraceSettings {
   double rhoMaxInit = 5.0;
   double stepPixels = 1.0;
   int maxSamples = 100;
+  // Coarse to fine: searches longer than coarseMinSamples steps sample every coarseStep-th step, then step by step
+  // around the best match and the best one beyond secondBestExclusionPixels (1 = off).
+  int coarseStep = 1;
+  double coarseMinSamples = 16;
   double minSearchPixels = 1.5;
   double outlierEnergyPerPixel = 12.0 * 12.0;
   double minQuality = 2.0;

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <execution>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -60,7 +61,8 @@ FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d
   for (const auto& [key, own] : viewPoints) views.emplace_back(key, &own);
   result.views = static_cast<int>(views.size());
 
-  // Points by cell of the search radius: a view visits the cells around its camera.
+  // Points by cell of the search radius, stored cell by cell (positions contiguous): a view visits the cells around
+  // its camera and skips those entirely beyond the radius or outside its field of view.
   const double cell = std::max(settings.radius / 4, 0.5);
   auto cellOf = [&](const Eigen::Vector3d& x) {
     return std::array<long long, 3>{static_cast<long long>(std::floor(x.x() / cell)),
@@ -72,16 +74,45 @@ FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d
     return (static_cast<std::uint64_t>(x + kOffset) & 0x1fffff) << 42 |
            (static_cast<std::uint64_t>(y + kOffset) & 0x1fffff) << 21 | (static_cast<std::uint64_t>(z + kOffset) & 0x1fffff);
   };
-  std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> grid;
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> sorted(n);
   for (size_t i = 0; i < n; ++i) {
     const auto c = cellOf(points[i].position);
-    grid[cellKey(c[0], c[1], c[2])].push_back(static_cast<std::uint32_t>(i));
+    sorted[i] = {cellKey(c[0], c[1], c[2]), static_cast<std::uint32_t>(i)};
+  }
+  std::sort(std::execution::par, sorted.begin(), sorted.end());
+  std::vector<Eigen::Vector3d> position(n);
+  std::vector<std::int64_t> host(n);  // -1: not a semi-dense point
+  std::unordered_map<std::uint64_t, std::pair<std::uint32_t, std::uint32_t>> grid;  // cell -> sorted range
+  for (size_t s = 0; s < n; ++s) {
+    const MapPoint& p = points[sorted[s].second];
+    position[s] = p.position;
+    host[s] = p.source == MapPointSource::SemiDense ? hostKey(p) : -1;
+    auto [it, inserted] = grid.try_emplace(sorted[s].first, static_cast<std::uint32_t>(s), static_cast<std::uint32_t>(s));
+    it->second.second = static_cast<std::uint32_t>(s + 1);
+  }
+
+  // Largest angle from the optical axis of any image pixel (the border, with half a pixel and a degree to spare),
+  // so a cell beyond it holds no point that projects into the image.
+  std::vector<double> maxAngle(rig.size(), M_PI);
+  for (int c = 0; c < rig.size(); ++c) {
+    const Camera& cam = rig.cameras[c];
+    double worst = 0;
+    bool ok = true;
+    auto border = [&](double u, double v) {
+      Eigen::Vector3d b;
+      if (!cam.unproject(Eigen::Vector2d(u, v), b)) ok = false;
+      else worst = std::max(worst, std::acos(std::clamp(b.z(), -1.0, 1.0)));
+    };
+    for (int u = 0; u <= cam.width; ++u) border(u - 0.5, -0.5), border(u - 0.5, cam.height - 0.5);
+    for (int v = 0; v <= cam.height; ++v) border(-0.5, v - 0.5), border(cam.width - 0.5, v - 0.5);
+    if (ok) maxAngle[c] = std::min(M_PI, worst + M_PI / 180);
   }
 
   std::vector<std::atomic<int>> support(n), through(n);
   const int k = 2 * settings.window + 1;
   const cv::Mat kernel = cv::Mat::ones(k, k, CV_8U);
   const long long reach = static_cast<long long>(std::ceil(settings.radius / cell));
+  const double cellRadius = cell * std::sqrt(3.0) / 2;
   parallelChunks(views.size(), [&](size_t, size_t begin, size_t end) {
     for (size_t vi = begin; vi < end; ++vi) {
       const std::int64_t key = views[vi].first;
@@ -98,17 +129,26 @@ FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d
       cv::erode(depth, depth, kernel);  // the nearest of the view's own points within the window
 
       const Eigen::Vector3d center = T_c_w.inverse().translation();
+      const Eigen::Vector3d axis = T_c_w.so3().inverse() * Eigen::Vector3d::UnitZ();
       const auto c0 = cellOf(center);
       for (long long dx = -reach; dx <= reach; ++dx)
         for (long long dy = -reach; dy <= reach; ++dy)
           for (long long dz = -reach; dz <= reach; ++dz) {
             const auto it = grid.find(cellKey(c0[0] + dx, c0[1] + dy, c0[2] + dz));
             if (it == grid.end()) continue;
-            for (std::uint32_t i : it->second) {
-              const MapPoint& p = points[i];
-              if (p.source == MapPointSource::SemiDense && hostKey(p) == key) continue;
-              if ((p.position - center).squaredNorm() > settings.radius * settings.radius) continue;
-              const Eigen::Vector3d x = T_c_w * p.position;
+            const Eigen::Vector3d mid = (Eigen::Vector3d(c0[0] + dx, c0[1] + dy, c0[2] + dz).array() + 0.5).matrix() * cell;
+            const Eigen::Vector3d toMid = mid - center;
+            const double dist = toMid.norm();
+            if (dist - cellRadius > settings.radius) continue;
+            if (dist > cellRadius && maxAngle[c] < M_PI) {
+              const double angle = std::acos(std::clamp(toMid.dot(axis) / dist, -1.0, 1.0));
+              if (angle - std::asin(cellRadius / dist) > maxAngle[c]) continue;
+            }
+            for (std::uint32_t s = it->second.first; s < it->second.second; ++s) {
+              if (host[s] == key) continue;
+              const Eigen::Vector3d& pw = position[s];
+              if ((pw - center).squaredNorm() > settings.radius * settings.radius) continue;
+              const Eigen::Vector3d x = T_c_w * pw;
               Eigen::Vector2d uv;
               if (!cam.project(x, uv)) continue;
               const int u = static_cast<int>(std::lround(uv.x())), v = static_cast<int>(std::lround(uv.y()));
@@ -116,16 +156,17 @@ FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d
               const double dv = depth.at<float>(v, u);
               if (!std::isfinite(dv)) continue;
               const double dp = x.norm(), r = dv / dp;
-              if (std::abs(r - 1) < settings.tolerance) support[i].fetch_add(1, std::memory_order_relaxed);
+              if (std::abs(r - 1) < settings.tolerance) support[s].fetch_add(1, std::memory_order_relaxed);
               else if (r > 1 + settings.margin && dv - dp > settings.minGap)
-                through[i].fetch_add(1, std::memory_order_relaxed);
+                through[s].fetch_add(1, std::memory_order_relaxed);
             }
           }
     }
   });
-  for (size_t i = 0; i < n; ++i) {
-    result.support[i] = support[i].load();
-    result.through[i] = through[i].load();
+  for (size_t s = 0; s < n; ++s) {
+    const std::uint32_t i = sorted[s].second;
+    result.support[i] = support[s].load();
+    result.through[i] = through[s].load();
     result.floater[i] = result.through[i] >= settings.minThrough && result.through[i] > result.support[i];
   }
   return result;

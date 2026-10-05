@@ -44,7 +44,7 @@ GS_CAMS=${GS_CAMS:-$VO_CAMS$([[ " $VO_CAMS " == *" B_MIDRANGECAM_C "* ]] || echo
 DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R:B_MIDRANGECAM_C"}
 # Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
 VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}
-DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space --densify-drop-frames 5}
+DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space --densify-drop-frames 5 --densify-coarse-step 2}
 FORWARD=${FORWARD:-1.55}
 HEIGHT=${HEIGHT:-1.50}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True HF_HUB_OFFLINE=1

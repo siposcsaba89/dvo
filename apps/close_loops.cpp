@@ -360,6 +360,9 @@ int main(int argc, char** argv) {
        "multi-view check voxel, m (0 = off)")
       ("densify-voxel-hosts", po::value(&dense.minVoxelHosts)->default_value(dense.minVoxelHosts),
        "host images a voxel needs")
+      ("densify-coarse-step", po::value(&dense.trace.coarseStep)->default_value(dense.trace.coarseStep),
+       "densify: long epipolar searches sample every this many pixels, then pixel by pixel around the two best "
+       "matches (1 = every pixel)")
       ("densify-min-quality", po::value(&dense.trace.minQuality)->default_value(dense.trace.minQuality),
        "densify: second best / best energy along the epipolar line for a good trace")
       ("densify-verify", po::bool_switch(&dense.verify),
