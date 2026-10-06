@@ -45,6 +45,10 @@ struct OdometrySettings {
   double kfBrightness = 0.7;
   double kfRmseFactor = 2.0;
   double marginalizeVisibleFraction = 0.05;  // DSO §3.1
+  // A keyframe also leaves the window when fewer than this fraction of the residuals of newer keyframes' points in it
+  // are good (counted once there are enough of them): it no longer sees the scene (0 = off).
+  double marginalizeNewerGoodFraction = 0.0;
+  int marginalizeMinNewerResiduals = 200;
   double stereoMinDepth = 1.5;  // bounds the initial search range between cameras of one keyframe
   // Second best / best energy for a good trace between cameras of one keyframe. These carry the metric scale; a
   // stricter value for them (as for the temporal traces, trace.minQuality) loses it (garage: 22 % short at 3 with an
@@ -90,6 +94,7 @@ class Odometry {
   // Marginalised points plus the active points still in the window (and converged candidates, see mapCandidates).
   std::vector<MapPoint> mapPoints() const;
   std::vector<int> keyframeIndices() const;
+  std::vector<int> windowKeyframeIndices() const;  // keyframes not marginalised yet
   // With extractFeatures: one record per keyframe in input order, taken when the keyframe leaves the window.
   std::vector<KeyframeRecord> keyframeRecords() const;
   const Rig& rig() const { return m_rig; }

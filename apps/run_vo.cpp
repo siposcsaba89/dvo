@@ -102,6 +102,9 @@ int main(int argc, char** argv) {
       ("keyframes", po::value(&settings.maxKeyframes)->default_value(7), "keyframes in the window")
       ("points", po::value(&settings.targetActivePoints)->default_value(2000), "target active points")
       ("candidates", po::value(&settings.candidatesPerKeyframe)->default_value(1500), "candidates per keyframe")
+      ("prediction-level",
+       po::value(&settings.tracking.predictionLevel)->default_value(settings.tracking.predictionLevel),
+       "tracking: also refine the motion prediction from this pyramid level down, keep the better (-1 = off)")
       ("kf-flow", po::value(&settings.kfFlow)->default_value(settings.kfFlow), "keyframe flow scale (px)")
       ("kf-tflow", po::value(&settings.kfTranslationFlow)->default_value(settings.kfTranslationFlow),
        "keyframe translation flow scale (px)")
@@ -119,7 +122,10 @@ int main(int argc, char** argv) {
        "window BA: a residual is an outlier above the energy of |r| = this per pixel")
       ("point-min-good-fraction", po::value(&settings.pointMinGoodFraction)->default_value(settings.pointMinGoodFraction),
        "drop window points whose good residuals are fewer than this fraction of their residuals in the image")
-      ("ba-iterations", po::value(&settings.windowIterations)->default_value(settings.windowIterations),
+      ("marginalize-newer-good",
+       po::value(&settings.marginalizeNewerGoodFraction)->default_value(settings.marginalizeNewerGoodFraction),
+       "also marginalise a keyframe when fewer than this fraction of newer keyframes' residuals in it are good")
+      ("ba-iterations",po::value(&settings.windowIterations)->default_value(settings.windowIterations),
        "window BA iterations per keyframe")
       ("cam-alpha", po::value<double>()->notifier([&](double a) { camAlpha = a; }),
        "override the EUCM alpha of the camera(s); a small negative value corrects residual pincushion distortion "

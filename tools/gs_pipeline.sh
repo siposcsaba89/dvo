@@ -43,7 +43,9 @@ VO_CAMS=${VO_CAMS:-F_CTCAM_L F_CTCAM_R M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R}
 GS_CAMS=${GS_CAMS:-$VO_CAMS$([[ " $VO_CAMS " == *" B_MIDRANGECAM_C "* ]] || echo " B_MIDRANGECAM_C")}
 DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L M_NEIGHBORLANECAM_R:B_MIDRANGECAM_C"}
 # Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
-VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}
+# Odometry robustness (docs/GS_PIPELINE.md step 1): keyframes that no longer see the scene leave the window; tracking
+# also starts from the motion prediction at level 2 (headlights on tunnel walls).
+VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5 --marginalize-newer-good 0.3 --prediction-level 2}
 DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space --densify-drop-frames 5 --densify-coarse-step 2}
 # cloud.ply only (points.ply keeps every point for the depth references); 3 cm = the export_colmap voxel.
 CLOUD_ARGS=${CLOUD_ARGS:---ply-voxel 0.03 --ply-max-sigma 0.006}

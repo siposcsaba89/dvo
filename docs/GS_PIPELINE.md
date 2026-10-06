@@ -90,7 +90,8 @@ moved < 0.3 % / 0.6 px, F_MIDRANGECAM_C cy 2 px, i.e. the same pitch).
 ### 1. Odometry (CPU, ~40 ms/frame)
 
 ```bash
-VO_ARGS="--trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5"
+VO_ARGS="--trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5 --marginalize-newer-good 0.3 \
+    --prediction-level 2"
 $B/run_vo --rig $R/rig/rig.yaml --rig-cameras $VO --scale 0.5 $VO_ARGS -o $R/poses.txt --keyframes-out $R/keyframes.kfr \
     --png $R/odometry.png --trajectory-ply $R/odometry_trajectory.ply
 python tools/plot_trajectory.py $R/odometry_trajectory.png $R/poses.txt      # top view by height + height over time
@@ -100,7 +101,16 @@ Odometry on the four CT + neighbour-lane cameras (the fisheyes were worse, see R
 needs the second-best match along the epipolar line at 3x the best energy (default 2), between the cameras of a
 keyframe too, and a point leaves the window when fewer than half of its residuals in the image are good. Zion
 garage: odometry points 12.9 -> 9.4 % floaters, maximum loop drift 0.29 -> 0.06 m. Stricter settings lose the metric
-scale (ambiguity 5: the run 42 % short): compare the run length with an earlier run. Look at `odometry.png`
+scale (ambiguity 5: the run 42 % short): compare the run length with an earlier run. The good fraction only counts
+the point's host and newer keyframes (in older ones new points are often occluded). `--marginalize-newer-good 0.3`:
+a keyframe also leaves the window when under 30 % of the newer keyframes' residuals in it are good; the rear cameras
+otherwise keep views of a lower garage level in the window for hundreds of frames (DSO's rule only asks whether the
+newest keyframe sees the keyframe's own points). `--prediction-level 2`: when coarse-to-fine tracking jumps back
+towards the reference keyframe, tracking from the motion prediction at pyramid level 2 replaces it if its energy is
+lower; headlight pools on tunnel walls move with the car and pull the coarse levels to zero motion. Voxelnet
+up-ramp (frames 7700-9400, six starts): forward speed in the ramp tunnel never below 102 mm/frame (before: down to
+-14, a 10 m fall); full run: levels 3.60 m apart after the loops, both ramps 3.62 m (before: lower level split
+by 35 cm, ramps 3.55 / 3.21 m). Look at `odometry.png`
 (top view with the map points) and `odometry_trajectory.png` (levels of a multi-storey garage are height plateaus;
 drift shows as a sloping floor). `--ply` would also write the coloured map points, at the cost of decoding every
 keyframe image again; the pipeline does not need them.
@@ -701,3 +711,19 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   and most floaters gone; GS points3D change accordingly, not yet compared in a GS training). `points.ply` keeps every point (free-space test and
   depth references need the per-host density). `tools/cloud_tiles.py`: quality filter, voxel thinning and
   world-coordinate tiles for viewing.
+- 2026-10-06: odometry robustness on the voxelnet up-ramp (the trajectory hook in the ramp tunnel, also after the
+  loop closure). Cause: the 360° rig keeps stale keyframes (views of the level below, up to 600 frames old) in the
+  window, new tunnel points get mostly outlier residuals there and `--point-min-good-fraction 0.5` removed them
+  (as many removed as activated per keyframe), the starved window lost the forward motion. Fixes: the good fraction
+  counts only the host and newer keyframes; `--marginalize-newer-good 0.3` (keyframes that no longer see newer
+  points leave the window); the window's visibility rule counts points instead of residuals; `--prediction-level 2`
+  (tracking from the motion prediction when coarse-to-fine jumps back towards the reference: headlight pools on the
+  tunnel walls). Short segments vs loop-closed poses, 6 / 4 cameras: ramp forward speed 43 / 63 -> 103 / 103
+  mm/frame, flat floor ATE 0.30 / 0.21 -> 0.20 / 0.09 m, curve ATE 0.64 / 0.77 -> 0.47 / 0.38-0.57 m (4 cameras:
+  three starts; a start at frame 2700, in motion next to a lit wall, initialises at a quarter of the scale with any
+  setting). Zion garage (4 cameras): +15 % points, floaters 9.5 -> 10.4 %, loops 131 -> 157, max loop correction
+  0.04 -> 0.06 m. Tried and dropped: a zero vertical velocity prior in tracking, candidate activation ordered by
+  pose information, `--stereo-weight 3` (fixed nothing real, caused tunnel stalls on 4 cameras).
+  Full voxelnet rerun (6 cameras): odometry vs the old loop-closed poses 1.12 -> 0.80 m ATE, loop corrections
+  median 0.12 -> 0.06 m, max 3.46 -> 0.90 m; after the loops both ramps 3.62 m and the lower level one floor at
+  -3.60 m (the old loop-closed 3.21 m climb, used as reference above, was itself wrong).

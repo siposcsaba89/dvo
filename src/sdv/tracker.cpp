@@ -218,7 +218,8 @@ TrackingResult FrameTracker::track(const ReferenceFrame& ref, const ImagePyramid
 TrackingResult FrameTracker::track(const Rig& rig, const std::vector<ReferenceFrame>& refs,
                                    const std::vector<const ImagePyramid*>& targets,
                                    const std::vector<Sophus::SE3d>& hypotheses,
-                                   const std::vector<AffineBrightness>& initialAffine) const {
+                                   const std::vector<AffineBrightness>& initialAffine,
+                                   const Sophus::SE3d* T_prev_ref) const {
   TrackingResult result;
   int top = std::numeric_limits<int>::max();
   for (int c = 0; c < rig.size(); ++c) top = std::min({top, refs[c].numLevels() - 1, targets[c]->numLevels() - 1});
@@ -249,19 +250,43 @@ TrackingResult FrameTracker::track(const Rig& rig, const std::vector<ReferenceFr
     }
   }
 
-  System sys;
-  for (int l = top; l >= 0; --l) {
-    double cutoff = m_settings.outlierCutoff;
-    for (int attempt = 0;; ++attempt) {
-      State s = best;
-      sys = optimizeLevel(rig, refs, targets, l, s, cutoff, iterations(l));
-      if (sys.inlierRatio() >= m_settings.minInlierRatio || attempt >= m_settings.maxCutoffIncreases) {
-        best = s;
-        break;
+  auto coarseToFine = [&](State state, int from) {
+    System sys;
+    for (int l = from; l >= 0; --l) {
+      double cutoff = m_settings.outlierCutoff;
+      for (int attempt = 0;; ++attempt) {
+        State s = state;
+        sys = optimizeLevel(rig, refs, targets, l, s, cutoff, iterations(l));
+        if (sys.inlierRatio() >= m_settings.minInlierRatio || attempt >= m_settings.maxCutoffIncreases) {
+          state = s;
+          break;
+        }
+        cutoff *= 2.0;
       }
-      cutoff *= 2.0;
+    }
+    return std::pair{state, sys};
+  };
+  auto [refined, sys] = coarseToFine(best, top);
+  const double step = T_prev_ref ? (hypotheses[0] * T_prev_ref->inverse()).translation().norm() : 0.0;
+  const double jump = (refined.T_t_h.translation() - hypotheses[0].translation()).norm();
+  if (m_settings.predictionLevel >= 0 && m_settings.predictionLevel < top && jump > m_settings.predictionJump * step &&
+      refined.T_t_h.translation().norm() < hypotheses[0].translation().norm()) {
+    // Lighting that moves with the vehicle (headlights on tunnel walls) looks the same in the reference and the new
+    // frame. It is smooth, so it dominates the coarse levels and pulls the estimate towards zero motion relative to
+    // the reference (aiMotive up-ramp: 0.75 m predicted, 0.2 m tracked). A start from the prediction at a finer level
+    // avoids that. It only replaces a result that jumped towards the reference by more than predictionJump times the
+    // predicted step from the previous frame: a lower energy alone can also come from a map whose scale is wrong (a
+    // start in motion: the coarse levels find the larger true motion, at a higher fine-level energy), and preferring
+    // it for small differences ratchets a weakly observed scale.
+    auto [predicted, predictedSys] = coarseToFine({hypotheses[0], initialAffine}, m_settings.predictionLevel);
+    if (refined.T_t_h.translation().norm() < predicted.T_t_h.translation().norm() &&
+        predictedSys.normalizedEnergy() < sys.normalizedEnergy()) {
+      refined = predicted;
+      sys = predictedSys;
+      result.hypothesis = 0;
     }
   }
+  best = refined;
 
   result.T_t_h = best.T_t_h;
   result.affine = best.affine;

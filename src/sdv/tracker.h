@@ -25,6 +25,10 @@ struct TrackingSettings {
   double border = 2.0;
   double affinePriorA = 0.0;
   double affinePriorB = 0.0;
+  // Also refine the first hypothesis (the motion prediction) from this pyramid level down, and keep it if its
+  // finest-level energy is lower than that of a coarse-to-fine result that jumped towards the reference (-1 = off).
+  int predictionLevel = -1;
+  double predictionJump = 0.5;  // minimum jump, relative to the predicted step from the previous frame
 };
 
 class ReferenceFrame {
@@ -68,10 +72,12 @@ class FrameTracker {
  public:
   explicit FrameTracker(TrackingSettings settings) : m_settings(std::move(settings)) {}
 
-  // One reference and one target pyramid per rig camera; a point is aligned within its own camera.
+  // One reference and one target pyramid per rig camera; a point is aligned within its own camera. T_prev_ref, the
+  // previous frame w.r.t. the reference, gives the predicted step for TrackingSettings::predictionLevel.
   TrackingResult track(const Rig& rig, const std::vector<ReferenceFrame>& refs,
                        const std::vector<const ImagePyramid*>& targets, const std::vector<Sophus::SE3d>& hypotheses,
-                       const std::vector<AffineBrightness>& initialAffine) const;
+                       const std::vector<AffineBrightness>& initialAffine,
+                       const Sophus::SE3d* T_prev_ref = nullptr) const;
   TrackingResult track(const ReferenceFrame& ref, const ImagePyramid& target,
                        const std::vector<Sophus::SE3d>& hypotheses, const AffineBrightness& initialAffine) const;
 

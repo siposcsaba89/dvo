@@ -65,6 +65,48 @@ TEST_P(TrackerTest, PicksBestHypothesis) {
   EXPECT_LT((res.T_t_h * T_t_h.inverse()).log().norm(), 3e-3);
 }
 
+TEST_P(TrackerTest, PredictionStartResistsLightingMovingWithTheCamera) {
+  const sdv::Camera& cam = GetParam();
+  const Sophus::SE3d T_t_h = Sophus::SE3d::trans(0.02, -0.01, -0.6);
+  // A wall with only fine texture, which the coarse levels blur away, and a smooth bright pool fixed in the image, as
+  // headlights in a tunnel: at the coarse levels the pool dominates and favours zero motion.
+  auto wall = [&](double u, double v) {
+    return 60 + 25 * (std::sin(0.8 * u) * std::sin(0.64 * v) + 0.6 * std::sin(0.48 * (u + v)));
+  };
+  auto pool = [&](int u, int v) {
+    const double r2 = (u - kW / 2.0) * (u - kW / 2.0) + (v - kH / 2.0) * (v - kH / 2.0);
+    return 120.0 * std::exp(-r2 / (2 * 70.0 * 70.0));
+  };
+  cv::Mat hostImg(kH, kW, CV_32F), targetImg(kH, kW, CV_32F, cv::Scalar(0));
+  const Sophus::SE3d T_h_t = T_t_h.inverse();
+  for (int v = 0; v < kH; ++v)
+    for (int u = 0; u < kW; ++u) {
+      hostImg.at<float>(v, u) = static_cast<float>(wall(u, v) + pool(u, v));
+      Eigen::Vector3d b;
+      Eigen::Vector2d uvHost;
+      if (!cam.unproject(Eigen::Vector2d(u, v), b)) continue;
+      const Eigen::Vector3d dir = T_h_t.so3() * b;
+      const double s = (synthetic::kDist - synthetic::kNormal.dot(T_h_t.translation())) / synthetic::kNormal.dot(dir);
+      if (s > 0 && cam.project(Eigen::Vector3d(T_h_t.translation() + s * dir), uvHost))
+        targetImg.at<float>(v, u) = static_cast<float>(wall(uvHost.x(), uvHost.y()) + pool(u, v));
+    }
+  const sdv::ImagePyramid host(hostImg, kLevels);
+  const sdv::ImagePyramid target(targetImg, kLevels);
+  const std::vector<sdv::ReferenceFrame> refs = {makeReference(cam, host)};
+  const sdv::Rig rig = sdv::Rig::mono(cam);
+  const Sophus::SE3d prev = Sophus::SE3d::trans(0.018, -0.009, -0.54);  // the predicted step is 0.06 m
+
+  auto track = [&](int predictionLevel) {
+    sdv::TrackingSettings settings;
+    settings.predictionLevel = predictionLevel;
+    const auto res = sdv::FrameTracker(settings).track(rig, refs, {&target}, {T_t_h}, {{}}, &prev);
+    EXPECT_TRUE(res.ok);
+    return (res.T_t_h.translation() - T_t_h.translation()).norm();
+  };
+  EXPECT_GT(track(-1), 0.3);  // coarse-to-fine alone is pulled most of the way back to the reference
+  EXPECT_LT(track(2), 0.005);
+}
+
 TEST(Tracker, MotionHypothesesStartWithConstantVelocity) {
   const Sophus::SE3d prevRef = Sophus::SE3d::exp((Sophus::Vector6d() << 0, 0, -1, 0, 0.01, 0).finished());
   const Sophus::SE3d vel = Sophus::SE3d::exp((Sophus::Vector6d() << 0, 0, -1, 0, 0.01, 0).finished());

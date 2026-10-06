@@ -82,7 +82,7 @@ OdometryFrameInfo Odometry::addFrame(const std::vector<cv::Mat>& images) {
     std::vector<const ImagePyramid*> targets;
     for (const auto& p : pyr) targets.push_back(p.get());
     res = m_tracker.track(m_rig, m_reference, targets, makeMotionHypotheses(m_T_prev_ref, m_T_prev_prevprev),
-                          m_lastAffine);
+                          m_lastAffine, &m_T_prev_ref);
   }
   m_T_prev_prevprev = res.T_t_h * m_T_prev_ref.inverse();
   m_T_prev_ref = res.T_t_h;
@@ -340,15 +340,22 @@ void Odometry::activateCandidates(int newKeyframeId) {
 }
 
 void Odometry::removeOutlierPoints() {
-  // Outlier residuals are already excluded from the optimisation. A point is only dropped when no residual
-  // supports it: new points are often occluded or strongly warped in keyframes older than their host, which
-  // tracing never checked, and dropping them for that starves monocular scale (KITTI 00, frames 4000-4500).
+  // Outlier residuals are already excluded from the optimisation. The good fraction only counts the host and newer
+  // keyframes, the views tracing checked: new points are often occluded or strongly warped in older keyframes, and
+  // dropping them for that starves the window (KITTI 00 frames 4000-4500: monocular scale; aiMotive up-ramp: a
+  // 360° rig keeps keyframes from the level below, and the forward motion in the ramp tunnel stalls).
+  // Those outliers instead mark the older keyframe for marginalisation, see marginalizeKeyframes.
   std::vector<int> remove;
   for (const auto& p : m_window.points()) {
     if (p.residuals.empty()) continue;
-    int inside = 0;
-    for (const auto& r : p.residuals) inside += r.state != ResidualState::OutOfBounds;
-    if (p.numGood() == 0 || p.numGood() < m_settings.pointMinGoodFraction * inside) remove.push_back(p.id);
+    int inside = 0, good = 0;
+    const int hostFrame = m_keyframeFrameIndex.at(p.host);
+    for (const auto& r : p.residuals) {
+      if (m_keyframeFrameIndex.at(r.target) < hostFrame) continue;
+      inside += r.state != ResidualState::OutOfBounds;
+      good += r.state == ResidualState::Good;
+    }
+    if (p.numGood() == 0 || good < m_settings.pointMinGoodFraction * inside) remove.push_back(p.id);
   }
   for (int id : remove) m_window.removePoint(id);
 }
@@ -360,13 +367,31 @@ void Odometry::marginalizeKeyframes() {
     const int newest = frames.back().id;
     std::vector<int> flagged;
     for (size_t i = 0; i + 2 < frames.size(); ++i) {
-      int hosted = 0, visible = 0;
+      const int frameIndex = m_keyframeFrameIndex.at(frames[i].id);
+      int hosted = 0, visible = 0, seen = 0, seenGood = 0;
       for (const auto& p : m_window.points()) {
-        if (p.host != frames[i].id) continue;
-        ++hosted;
-        for (const auto& r : p.residuals) visible += r.target == newest && r.state == ResidualState::Good;
+        if (p.host == frames[i].id) {
+          ++hosted;
+          // A point counts once, however many cameras of the newest keyframe see it.
+          visible += std::ranges::any_of(p.residuals, [&](const WindowResidual& r) {
+            return r.target == newest && r.state == ResidualState::Good;
+          });
+        } else if (m_keyframeFrameIndex.at(p.host) > frameIndex) {
+          for (const auto& r : p.residuals) {
+            if (r.target != frames[i].id || r.state == ResidualState::OutOfBounds) continue;
+            ++seen;
+            seenGood += r.state == ResidualState::Good;
+          }
+        }
       }
-      if (visible < m_settings.marginalizeVisibleFraction * std::max(hosted, 1)) flagged.push_back(frames[i].id);
+      // DSO §3.1 only asks whether the newest keyframe still sees this keyframe's points, which a 360° rig answers
+      // with its rear cameras long after the keyframe stopped seeing the scene ahead. So the reverse is asked too:
+      // whether this keyframe sees the points of newer keyframes (by residuals that project inside its images).
+      const bool stale = seen >= m_settings.marginalizeMinNewerResiduals &&
+                         seenGood < m_settings.marginalizeNewerGoodFraction * seen;
+      spdlog::trace("keyframe {} in window: {} of {} own points seen by the newest, {} of {} newer points good",
+                    frameIndex, visible, hosted, seenGood, seen);
+      if (stale || visible < m_settings.marginalizeVisibleFraction * std::max(hosted, 1)) flagged.push_back(frames[i].id);
     }
     for (int id : flagged) marginalize(id);
   }
@@ -563,6 +588,12 @@ std::vector<std::vector<AffineBrightness>> Odometry::brightness() const {
 std::vector<int> Odometry::keyframeIndices() const {
   std::vector<int> out;
   for (const auto& [id, index] : m_keyframeFrameIndex) out.push_back(index);
+  return out;
+}
+
+std::vector<int> Odometry::windowKeyframeIndices() const {
+  std::vector<int> out;
+  for (const auto& [id, kf] : m_keyframes) out.push_back(kf.frameIndex);
   return out;
 }
 

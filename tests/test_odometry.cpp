@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <optional>
 
 #include <gtest/gtest.h>
@@ -181,4 +182,58 @@ TEST(OdometryRig, SurroundFisheyeRigIsMetric) {
   std::vector<int> perCamera(rig.size(), 0);
   for (const auto& p : vo.mapPoints()) ++perCamera[p.camera];
   for (int c = 0; c < rig.size(); ++c) EXPECT_GT(perCamera[c], 100) << "camera " << c;
+}
+
+TEST(OdometryRig, KeyframesThatNoLongerSeeTheSceneLeaveTheWindow) {
+  // A surround rig drives into a new area: from frame kSwitch on, every face but the rear wall looks different (as a
+  // ramp tunnel seen from the level below). The old keyframes still see their rear-wall points with the rear camera,
+  // so the visibility rule alone keeps them, but newer points are outliers in them.
+  constexpr int kSwitch = 8, kFrames = 30;
+  const sdv::Camera cam = sdv::Camera::eucm(140, 140, 160.2, 119.7, 0.6, 1.1, kW, kH);
+  const sdv::Rig rig{{cam, cam, cam, cam},
+                     {synthetic::room::cameraFromBody(0.0, {1.5, 0.0, 0.5}),
+                      synthetic::room::cameraFromBody(M_PI / 2, {0.5, 0.4, 0.5}),
+                      synthetic::room::cameraFromBody(-M_PI / 2, {0.5, -0.4, 0.5}),
+                      synthetic::room::cameraFromBody(M_PI, {-0.5, 0.0, 0.5})}};
+  auto render = [&](const Sophus::SE3d& T_c_w, bool switched) {
+    const Sophus::SE3d T_w_c = T_c_w.inverse();
+    cv::Mat img(cam.height, cam.width, CV_32F, cv::Scalar(0));
+    for (int v = 0; v < cam.height; ++v)
+      for (int u = 0; u < cam.width; ++u) {
+        Eigen::Vector3d b;
+        if (!cam.unproject(Eigen::Vector2d(u, v), b)) continue;
+        const Eigen::Vector3d dir = T_w_c.so3() * b;
+        double value = 0;
+        const double s = synthetic::room::castRay(T_w_c.translation(), dir, &value);
+        const Eigen::Vector3d p = T_w_c.translation() + s * dir;
+        const bool rearWall = p.x() < synthetic::room::kMin.x() + 1e-6;
+        if (switched && !rearWall) value = synthetic::room::texture(1.3 * p.z() + 3.0, 0.7 * (p.x() + p.y()) - 2.0);
+        img.at<float>(v, u) = static_cast<float>(value);
+      }
+    cv::GaussianBlur(img, img, cv::Size(0, 0), 1.0);
+    return img;
+  };
+
+  auto run = [&](double newerGoodFraction) {
+    sdv::OdometrySettings settings;
+    settings.levels = 4;
+    settings.candidatesPerKeyframe = 600;
+    settings.targetActivePoints = 500;
+    settings.kfFlow = 20.0;
+    settings.kfTranslationFlow = 8.0;
+    settings.maxKeyframes = 7;
+    settings.marginalizeNewerGoodFraction = newerGoodFraction;
+    sdv::Odometry vo(rig, settings);
+    for (int k = 0; k < kFrames; ++k) {
+      const Sophus::SE3d T_w_b = Sophus::SE3d::trans(-4.0 + 0.1 * k, 0, 0);
+      std::vector<cv::Mat> images;
+      for (int c = 0; c < rig.size(); ++c) images.push_back(render(rig.T_c_b[c] * T_w_b.inverse(), k >= kSwitch));
+      vo.addFrame(images);
+    }
+    return vo.windowKeyframeIndices();
+  };
+  auto oldest = [](const std::vector<int>& window) { return *std::ranges::min_element(window); };
+  const auto before = run(0.0), after = run(0.3);
+  EXPECT_LT(oldest(before), kSwitch);
+  EXPECT_GE(oldest(after), kSwitch);
 }
