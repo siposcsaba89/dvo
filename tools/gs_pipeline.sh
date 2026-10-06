@@ -45,6 +45,8 @@ DA3_GROUPS=${DA3_GROUPS:-"$VO_CAMS:$VO_CAMS;B_MIDRANGECAM_C M_NEIGHBORLANECAM_L 
 # Odometry and densify point quality (docs/ROADMAP.md step 24): less ambiguous epipolar matches, free-space filter.
 VO_ARGS=${VO_ARGS:---trace-min-quality 3 --static-min-quality 3 --point-min-good-fraction 0.5}
 DENSIFY_ARGS=${DENSIFY_ARGS:---densify-min-quality 3 --free-space --densify-drop-frames 5 --densify-coarse-step 2}
+# cloud.ply only (points.ply keeps every point for the depth references); 3 cm = the export_colmap voxel.
+CLOUD_ARGS=${CLOUD_ARGS:---ply-voxel 0.03 --ply-max-sigma 0.006}
 FORWARD=${FORWARD:-1.55}
 HEIGHT=${HEIGHT:-1.50}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True HF_HUB_OFFLINE=1
@@ -95,7 +97,7 @@ if stage loops; then
     [ "${kf:-0}" -gt 400 ] && blocks=${PBA_ARGS:---pba-sparse-band 0 --pba-pcg 30}
     $B/close_loops --keyframes $R/keyframes.kfr --poses $R/poses.txt --vocabulary $V --rig $RIG \
         --rig-cameras $VO_CAMS --scale 0.5 --photometric --pba-points 120 $blocks --densify --densify-cameras $GS_CAMS --merge \
-        $DENSIFY_ARGS \
+        $DENSIFY_ARGS $CLOUD_ARGS \
         --out $R/diag/poses_loop.txt --ply $R/diag/cloud.ply --points-out $R/diag/points.ply > $R/diag/close_loops.log 2>&1
     # Without IMU "up" is the first frame's body up: level the map by the vehicle's mean up axis (ramps left out).
     $PY $DVO/tools/level_run.py $R/diag/poses_loop.txt $R/diag/cloud.ply $R/diag/points.ply | sed 's/^/    /'

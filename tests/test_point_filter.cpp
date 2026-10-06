@@ -15,6 +15,18 @@ TEST(PointFilter, VoxelThinAveragesPerVoxel) {
   EXPECT_EQ(colors[1 - a], (std::array<std::uint8_t, 3>{7, 7, 7}));
 }
 
+TEST(PointFilter, VoxelBestKeepsMostObservedSelectedPoint) {
+  auto point = [](Eigen::Vector3d x, int observations, double sigma) {
+    return sdv::MapPoint{x, 0.f, 0, 0, Eigen::Vector2d::Zero(), 1.0, observations, sigma, sdv::MapPointSource::SemiDense};
+  };
+  const std::vector<sdv::MapPoint> points = {
+      point({0.01, 0.01, 0.01}, 5, 0.01), point({0.02, 0.02, 0.02}, 9, 0.02), point({0.03, 0.01, 0.02}, 9, 0.01),
+      point({0.04, 0.04, 0.04}, 20, 0.001), point({-0.01, 0.0, 0.0}, 1, 0.1), point({0.11, 0.0, 0.0}, 2, 0.1)};
+  const std::vector<char> select = {1, 1, 1, 0, 1, 1};
+  EXPECT_EQ(sdv::voxelBest(points, select, 0.1), (std::vector<char>{0, 0, 1, 0, 1, 1}));
+  EXPECT_EQ(sdv::voxelBest(points, select, 0.0), select);
+}
+
 TEST(PointFilter, FreeSpaceFindsPointsInFrontOfAWall) {
   // Pinhole cameras on a line, all looking at a wall 6 m ahead (camera z); each hosts a grid of wall points, the
   // first camera also hosts points at 3 m that do not exist (the others see the wall through them).

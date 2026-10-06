@@ -37,6 +37,10 @@ struct FreeSpaceResult {
 FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d>& T_w_b,
                                   const std::vector<MapPoint>& points, const FreeSpaceSettings& settings = {});
 
+// Per point: whether it is the best of the selected points in its voxel (most observations, then the smallest
+// relative depth sigma). Unlike voxelThin, a kept point is an unchanged measurement with all its attributes.
+std::vector<char> voxelBest(const std::vector<MapPoint>& points, const std::vector<char>& select, double voxel);
+
 // One point per occupied voxel: the mean position and colour of its points.
 void voxelThin(std::vector<Eigen::Vector3d>& points, std::vector<std::array<std::uint8_t, 3>>& colors, double voxel);
 

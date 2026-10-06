@@ -145,10 +145,23 @@ floaters unchanged). `--densify-coarse-step 2`: epipolar searches longer than 16
 pixel by pixel around the best match and the best one beyond the ambiguity exclusion (densify -15 %, same points and
 precision).
 
-`poses_loop.txt`: body poses of all frames. `cloud.ply`: densified, merged cloud (neighbour filter 3 within 0.2 m).
+`poses_loop.txt`: body poses of all frames. `cloud.ply`: densified, merged cloud (neighbour filter 3 within 0.2 m),
+densified points with a relative depth interval <= 0.006, one point per 3 cm voxel (the one with the most
+observations; `CLOUD_ARGS`: close_loops `--ply-max-sigma 0.006 --ply-voxel 0.03`, also `--ply-min-observations`).
+Voxelnet: 42.2 M -> 8.0 M points (12.6 M with the voxel alone).
 `points.ply`: every point with its attributes (observations, depth sigma, kept); the **trusted points** of the later
 steps come from it (kept, >= 20 observations, sigma <= 0.004, an exported point within 3 cm). Check
 `detect_loops.log`: in multi-storey garages, loops between levels would show as large corrections.
+
+Still too large to view: `tools/cloud_tiles.py` filters `points.ply` by quality, keeps one point per voxel (most
+observations) and cuts it into world-coordinate tiles that open together with `trajectory_loop.ply`
+(`tile_<ix>_<iy>.ply`, `overview.ply`, `tiles.csv`; `--tile_z` for garage levels, `--bbox`/`--frames` for a part,
+`--attributes` keeps the scalar fields). Voxelnet: 42.2 M -> 22.0 M (observations >= 8, sigma <= 0.006) -> 7.1 M at
+3 cm, 12 tiles of 30 m, 7 s:
+
+```bash
+python tools/cloud_tiles.py $R/diag/points.ply $R/diag/tiles --kept --min_obs 8 --max_sigma 0.006 --voxel 0.03 --tile 30
+```
 
 Egomotion for other tools (aiMotive `egomotion2.json`, keyed by record frame id, `RT_ECEF_body` = T_world_body in
 the run's local levelled frame, not geodetic; `time`/`time_host` = earliest camera exposure start, host clock, s):
@@ -682,3 +695,9 @@ highest PSNR on the training views but a mirror world under the glossy floor; th
   the 2726 loop measurements: joint 0.5 cm median / 1.1 cm 90 % / 0.033 deg, blocks 0.7 / 1.6 cm / 0.042 deg
   (odometry 12 / 251 cm); the pipeline now runs the joint solve above 400 keyframes (`PBA_ARGS` overrides, e.g.
   `--pba-block-keyframes 200` when memory is short).
+- 2026-10-06: `cloud.ply` thinned in close_loops (`--ply-voxel`, best point per voxel by observations then sigma,
+  `sdv::voxelBest`; pipeline `--ply-voxel 0.03`, the export_colmap voxel). `--ply-min-observations` / `--ply-max-sigma` for
+  densified points; the pipeline uses `--ply-max-sigma 0.006` (voxelnet 42.2 M -> 8.0 M, a third of the points
+  and most floaters gone; GS points3D change accordingly, not yet compared in a GS training). `points.ply` keeps every point (free-space test and
+  depth references need the per-host density). `tools/cloud_tiles.py`: quality filter, voxel thinning and
+  world-coordinate tiles for viewing.

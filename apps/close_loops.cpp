@@ -230,7 +230,8 @@ int main(int argc, char** argv) {
   std::string rigFile, sequenceDir, rigOutFile, pointsFile, brightnessFile;
   std::vector<std::string> rigCameras, densifyCameras, intrinsicNames;
   double scale = 1.0, maxDistanceFactor = 5.0, maxDepthSigma = 0.0, neighbourRadius = 0.2;
-  int minResiduals = 3, minNeighbours = 3;
+  int minResiduals = 3, minNeighbours = 3, plyMinObservations = 0;
+  double plyVoxel = 0.0, plyMaxSigma = 0.0;
   sdv::LoopSettings loopSettings;
   sdv::PoseGraphSettings graphSettings;
   sdv::GlobalBASettings baSettings;
@@ -332,6 +333,12 @@ int main(int argc, char** argv) {
        "PLY: relative inverse-depth sigma limit (unit photometric noise, 0 = off)")
       ("min-neighbours", po::value(&minNeighbours)->default_value(3), "PLY: neighbours a point needs (0 = off)")
       ("neighbour-radius", po::value(&neighbourRadius)->default_value(0.2), "PLY: neighbour radius, m")
+      ("ply-min-observations", po::value(&plyMinObservations)->default_value(plyMinObservations),
+       "PLY: matches a densified point needs (--points-out keeps all)")
+      ("ply-max-sigma", po::value(&plyMaxSigma)->default_value(plyMaxSigma),
+       "PLY: relative depth interval limit of densified points (0 = off; --points-out keeps all)")
+      ("ply-voxel", po::value(&plyVoxel)->default_value(plyVoxel),
+       "PLY: one point per voxel, the one with the most observations, m (0 = off; --points-out keeps all)")
       ("pba-min-initial", po::value(&pbaSettings.minInitialResiduals)->default_value(pbaSettings.minInitialResiduals),
        "residuals a point needs to pass the initial check to take part")
       ("densify", po::bool_switch(&densify),
@@ -833,18 +840,27 @@ int main(int argc, char** argv) {
       std::vector<Eigen::Vector3d> positions;
       for (const auto& p : cloud) positions.push_back(p.position);
       const std::vector<char> keep = sdv::hasNeighbours(positions, neighbourRadius, minNeighbours);
-      size_t kept = 0;
+      std::vector<char> write = keep;
       for (size_t i = 0; i < cloud.size(); ++i)
-        if (keep[i]) {
+        if (cloud[i].source == sdv::MapPointSource::SemiDense &&
+            (cloud[i].observations < plyMinObservations || (plyMaxSigma > 0 && cloud[i].relativeDepthSigma > plyMaxSigma)))
+          write[i] = 0;
+      const auto good = std::ranges::count(write, 1);
+      write = sdv::voxelBest(cloud, write, plyVoxel);
+      size_t written = 0;
+      for (size_t i = 0; i < cloud.size(); ++i)
+        if (write[i]) {
           const float g = std::clamp(cloud[i].intensity, 0.f, 255.f);
           scene.addPoint(cloud[i].position,
                          cloud[i].color.value_or(std::array<std::uint8_t, 3>{static_cast<std::uint8_t>(g),
                                                                              static_cast<std::uint8_t>(g),
                                                                              static_cast<std::uint8_t>(g)}));
-          ++kept;
+          ++written;
         }
-      spdlog::info("{} of {} points written ({}+ neighbours within {:.2f} m)", kept, cloud.size(), minNeighbours,
-                   neighbourRadius);
+      spdlog::info("{} of {} points written ({} with {}+ neighbours within {:.2f} m, {} of them pass {}+ observations "
+                   "and sigma {}, {:.3f} m voxels)",
+                   written, cloud.size(), std::ranges::count(keep, 1), minNeighbours, neighbourRadius, good,
+                   plyMinObservations, plyMaxSigma, plyVoxel);
       if (!pointsFile.empty()) {
         sdv::writeMapPointsPly(pointsFile, cloud, &keep);
         spdlog::info("wrote {} ({} points with attributes, before the neighbour filter)", pointsFile, cloud.size());

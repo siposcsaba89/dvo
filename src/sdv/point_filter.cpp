@@ -10,6 +10,7 @@
 #include <map>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 #include <opencv2/imgproc.hpp>
 
@@ -170,6 +171,34 @@ FreeSpaceResult freeSpaceFloaters(const Rig& rig, const std::vector<Sophus::SE3d
     result.floater[i] = result.through[i] >= settings.minThrough && result.through[i] > result.support[i];
   }
   return result;
+}
+
+std::vector<char> voxelBest(const std::vector<MapPoint>& points, const std::vector<char>& select, double voxel) {
+  if (select.size() != points.size()) throw std::invalid_argument("one selection flag per point required");
+  if (voxel <= 0) return select;
+  constexpr long long kOffset = 1 << 20;
+  auto key = [&](const Eigen::Vector3d& x) {
+    std::uint64_t k = 0;
+    for (int i = 0; i < 3; ++i)
+      k = k << 21 | (static_cast<std::uint64_t>(static_cast<long long>(std::floor(x[i] / voxel)) + kOffset) & 0x1fffff);
+    return k;
+  };
+  std::vector<std::pair<std::uint64_t, std::uint32_t>> grid;
+  for (size_t i = 0; i < points.size(); ++i)
+    if (select[i]) grid.emplace_back(key(points[i].position), static_cast<std::uint32_t>(i));
+  auto better = [&](std::uint32_t a, std::uint32_t b) {
+    const MapPoint &pa = points[a], &pb = points[b];
+    if (pa.observations != pb.observations) return pa.observations > pb.observations;
+    if (pa.relativeDepthSigma != pb.relativeDepthSigma) return pa.relativeDepthSigma < pb.relativeDepthSigma;
+    return a < b;
+  };
+  std::sort(std::execution::par, grid.begin(), grid.end(), [&](const auto& a, const auto& b) {
+    return a.first != b.first ? a.first < b.first : better(a.second, b.second);
+  });
+  std::vector<char> best(points.size(), 0);
+  for (size_t i = 0; i < grid.size(); ++i)
+    if (i == 0 || grid[i].first != grid[i - 1].first) best[grid[i].second] = 1;
+  return best;
 }
 
 void voxelThin(std::vector<Eigen::Vector3d>& points, std::vector<std::array<std::uint8_t, 3>>& colors, double voxel) {
